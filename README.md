@@ -6,7 +6,7 @@ Here's a strong starting README you can drop into `README.md`:
 
 ### Visual programming. Real code. Your language.
 
-**[PROJECT NAME]** is a visual programming IDE built entirely in **Rust**.
+**[Blocko]** is a visual programming IDE built entirely in **Rust**.
 
 Instead of writing every line of code by hand, you build programs using **visual blocks and connections**. The project is then translated into real source code in the language you choose.
 
@@ -18,7 +18,7 @@ Instead of writing every line of code by hand, you build programs using **visual
 
 What if programming didn't have to start with syntax?
 
-With **[PROJECT NAME]**, you build your program visually:
+With **[Blocko]**, you build your program visually:
 
 ```text
         ┌──────────────┐
@@ -39,7 +39,7 @@ With **[PROJECT NAME]**, you build your program visually:
 
 The visual graph represents the actual logic of your program.
 
-Choose a target language, and **[PROJECT NAME]** generates readable source code.
+Choose a target language, and **[Blocko]** generates readable source code.
 
 ### Python
 
@@ -73,7 +73,7 @@ console.log(result);
 
 # 🧠 How It Works
 
-[PROJECT NAME] is built around a language-independent intermediate representation.
+[Blocko] is built around a language-independent intermediate representation.
 
 ```text
                  VISUAL PROGRAM
@@ -108,7 +108,7 @@ Language-specific generators then determine **how that program is expressed** in
 
 # 🦀 Built With Rust
 
-The entire core of [PROJECT NAME] is written in **Rust**.
+The entire core of [Blocko] is written in **Rust**.
 
 Rust powers:
 
@@ -129,7 +129,7 @@ The goal is simple:
 
 # ✨ Features
 
-> ⚠️ [PROJECT NAME] is currently under active development.
+> ⚠️ [Blocko] is currently under active development.
 
 ### 🧩 Visual Programming
 
@@ -189,7 +189,7 @@ The architecture is being designed around reusable nodes, language generators, a
 
 # 🎯 The Goal
 
-[PROJECT NAME] isn't trying to make traditional programming languages disappear.
+[Blocko] isn't trying to make traditional programming languages disappear.
 
 Instead, it aims to create another way of expressing them.
 
@@ -277,7 +277,7 @@ That's part of the fun.
 For developers building from source:
 
 ```bash
-git clone https://github.com/[USERNAME]/[REPOSITORY].git
+git clone https://github.com/GiorgiJ1/Blocko.git
 cd [REPOSITORY]
 
 cargo build --release
