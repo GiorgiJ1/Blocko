@@ -397,7 +397,7 @@ Because sometimes you know exactly what you want a program to do...
 
 but translating that idea into hundreds of lines of syntax is the annoying part.
 
-**[PROJECT NAME] is an attempt to make the logic itself the programming language.**
+**[Blocko] is an attempt to make the logic itself the programming language.**
 
 ---
 
