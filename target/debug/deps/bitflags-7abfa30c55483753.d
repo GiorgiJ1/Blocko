@@ -1,0 +1,11 @@
+C:\Users\giogu\Downloads\Blocko-main\Blocko-main\target\debug\deps\bitflags-7abfa30c55483753.d: C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\lib.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\iter.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\parser.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\traits.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\public.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\internal.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\external.rs
+
+C:\Users\giogu\Downloads\Blocko-main\Blocko-main\target\debug\deps\libbitflags-7abfa30c55483753.rmeta: C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\lib.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\iter.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\parser.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\traits.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\public.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\internal.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\external.rs
+
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\lib.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\iter.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\parser.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\traits.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\public.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\internal.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.13.1\src\external.rs:
