@@ -1,7 +1,3 @@
-Absolutely 😎. Since you're building this as a **real project/platform**, I'd make the README feel like an actual product page first and a technical Rust project second.
-
-Here's a strong starting README you can drop into `README.md`:
-
 # ⚡ [Blocko]
 
 ### Visual programming. Real code. Your language.
