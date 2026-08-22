@@ -44,6 +44,9 @@ impl CompareOp {
 enum NodeKind {
     Number(f32),
     Add,
+    Sub,
+    Mul,
+    Div,
     Print,
     Compare(CompareOp),
     Branch,
@@ -69,6 +72,9 @@ impl NodeKind {
         match self {
             NodeKind::Number(_) => "Number",
             NodeKind::Add => "Math (Add)",
+            NodeKind::Sub => "Math (Subtract)",
+            NodeKind::Mul => "Math (Multiply)",
+            NodeKind::Div => "Math (Divide)",
             NodeKind::Print => "Print",
             NodeKind::Compare(_) => "Compare",
             NodeKind::Branch => "If / Else",
@@ -85,7 +91,10 @@ impl NodeKind {
     fn input_labels(&self) -> Vec<&'static str> {
         match self {
             NodeKind::Number(_) => vec![],
-            NodeKind::Add => vec!["A", "B"],
+            NodeKind::Add
+            | NodeKind::Sub
+            | NodeKind::Mul
+            | NodeKind::Div => vec!["A", "B"],
             NodeKind::Print => vec!["In"],
             NodeKind::Compare(_) => vec!["A", "B"],
             NodeKind::Branch => vec!["Cond", "Then", "Else"],
@@ -102,7 +111,7 @@ impl NodeKind {
     fn output_labels(&self) -> Vec<&'static str> {
         match self {
             NodeKind::Number(_) => vec!["Value"],
-            NodeKind::Add => vec!["Result"],
+            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => vec!["Result"],
             NodeKind::Print => vec![],
             NodeKind::Compare(_) => vec!["Result"],
             NodeKind::Branch => vec!["Result"],
@@ -119,7 +128,7 @@ impl NodeKind {
     fn input_types(&self) -> Vec<PinDataType> {
         match self {
             NodeKind::Number(_) => vec![],
-            NodeKind::Add => vec![PinDataType::Number, PinDataType::Number],
+            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => vec![PinDataType::Number, PinDataType::Number],
             NodeKind::Print => vec![PinDataType::Any],
             NodeKind::Compare(_) => vec![PinDataType::Number, PinDataType::Number],
             NodeKind::Branch => vec![PinDataType::Bool, PinDataType::Number, PinDataType::Number],
@@ -136,7 +145,7 @@ impl NodeKind {
     fn output_types(&self) -> Vec<PinDataType> {
         match self {
             NodeKind::Number(_) => vec![PinDataType::Number],
-            NodeKind::Add => vec![PinDataType::Number],
+            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => vec![PinDataType::Number],
             NodeKind::Print => vec![],
             NodeKind::Compare(_) => vec![PinDataType::Bool],
             NodeKind::Branch => vec![PinDataType::Number],
@@ -266,6 +275,9 @@ enum IRType {
 enum IROp {
     Literal(f32),
     Add(String, String),
+    Sub(String, String),
+    Mul(String, String),
+    Div(String, String),
     Compare(CompareOp, String, String),
     Branch {
         cond: String,
@@ -347,6 +359,9 @@ fn emit_python_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>) {
             IRStmt::Compute(s) => match &s.op {
                 IROp::Literal(v) => lines.push(format!("{}{} = {}", pad, s.var_name, format_literal(*v))),
                 IROp::Add(a, b) => lines.push(format!("{}{} = {} + {}", pad, s.var_name, a, b)),
+                IROp::Sub(a, b) => lines.push(format!("{}{} = {} - {}", pad, s.var_name, a, b)),
+                IROp::Mul(a, b) => lines.push(format!("{}{} = {} * {}", pad, s.var_name, a, b)),
+                IROp::Div(a, b) => lines.push(format!("{}{} = {} / {}", pad, s.var_name, a, b)),
                 IROp::Compare(op, a, b) => {
                     lines.push(format!("{}{} = {} {} {}", pad, s.var_name, a, op.symbol(), b))
                 }
@@ -405,6 +420,9 @@ fn emit_rust_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, dec
             IRStmt::Compute(s) => match &s.op {
                 IROp::Literal(v) => lines.push(format!("{}let {} = {};", pad, s.var_name, format_literal(*v))),
                 IROp::Add(a, b) => lines.push(format!("{}let {} = {} + {};", pad, s.var_name, a, b)),
+                IROp::Sub(a, b) => lines.push(format!("{}let {} = {} - {};", pad, s.var_name, a, b)),
+                IROp::Mul(a, b) => lines.push(format!("{}let {} = {} * {};", pad, s.var_name, a, b)),
+                IROp::Div(a, b) => lines.push(format!("{}let {} = {} / {};", pad, s.var_name, a, b)),
                 IROp::Compare(op, a, b) => {
                     lines.push(format!("{}let {} = {} {} {};", pad, s.var_name, a, op.symbol(), b))
                 }
@@ -482,6 +500,9 @@ fn emit_js_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, decla
             IRStmt::Compute(s) => match &s.op {
                 IROp::Literal(v) => lines.push(format!("{}let {} = {};", pad, s.var_name, format_literal(*v))),
                 IROp::Add(a, b) => lines.push(format!("{}let {} = {} + {};", pad, s.var_name, a, b)),
+                IROp::Sub(a, b) => lines.push(format!("{}let {} = {} - {};", pad, s.var_name, a, b)),
+                IROp::Mul(a, b) => lines.push(format!("{}let {} = {} * {};", pad, s.var_name, a, b)),
+                IROp::Div(a, b) => lines.push(format!("{}let {} = {} / {};", pad, s.var_name, a, b)),
                 IROp::Compare(op, a, b) => {
                     lines.push(format!("{}let {} = {} {} {};", pad, s.var_name, a, op.symbol(), b))
                 }
@@ -548,6 +569,9 @@ fn emit_cpp_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, decl
             IRStmt::Compute(s) => match &s.op {
                 IROp::Literal(v) => lines.push(format!("{}auto {} = {};", pad, s.var_name, format_literal(*v))),
                 IROp::Add(a, b) => lines.push(format!("{}auto {} = {} + {};", pad, s.var_name, a, b)),
+                IROp::Sub(a, b) => lines.push(format!("{}auto {} = {} - {};", pad, s.var_name, a, b)),
+                IROp::Mul(a, b) => lines.push(format!("{}auto {} = {} * {};", pad, s.var_name, a, b)),
+                IROp::Div(a, b) => lines.push(format!("{}auto {} = {} / {};", pad, s.var_name, a, b)),
                 IROp::Compare(op, a, b) => {
                     lines.push(format!("{}auto {} = {} {} {};", pad, s.var_name, a, op.symbol(), b))
                 }
@@ -758,12 +782,25 @@ impl BlockoApp {
             NodeKind::Number(v) => Some(Value::Number(*v)),
             NodeKind::GetVariable(name) => variables.get(name).copied().map(Value::Number),
             NodeKind::FunctionCall { .. } => call_cache.get(&node_id).copied().map(Value::Number),
-            NodeKind::Add => {
+            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => {
                 let a_source = self.find_source_for_input(node_id, 0)?;
                 let b_source = self.find_source_for_input(node_id, 1)?;
                 let a_val = self.evaluate_output(a_source.node_id, visiting, variables, call_cache)?.as_number()?;
                 let b_val = self.evaluate_output(b_source.node_id, visiting, variables, call_cache)?.as_number()?;
-                Some(Value::Number(a_val + b_val))
+                let result = match &node.kind {
+                    NodeKind::Add => a_val + b_val,
+                    NodeKind::Sub => a_val - b_val,
+                    NodeKind::Mul => a_val * b_val,
+                    NodeKind::Div => {
+                        if b_val == 0.0 {
+                            0.0
+                        } else {
+                            a_val / b_val
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                Some(Value::Number(result))
             }
             NodeKind::Compare(op) => {
                 let a_source = self.find_source_for_input(node_id, 0)?;
@@ -1018,17 +1055,30 @@ impl BlockoApp {
                 var_names.insert(node_id, (var_name.clone(), IRType::Number));
                 Some((var_name.clone(), IRType::Number))
             }
-            NodeKind::Add => {
+            NodeKind::Add
+            | NodeKind::Sub
+            | NodeKind::Mul
+            | NodeKind::Div => {
                 let a_source = self.find_source_for_input(node_id, 0)?;
                 let b_source = self.find_source_for_input(node_id, 1)?;
                 let (a_name, _) = self.build_expr_ir(a_source.node_id, var_names, out, counters, visiting)?;
                 let (b_name, _) = self.build_expr_ir(b_source.node_id, var_names, out, counters, visiting)?;
-                let name = format!("add_{}", counters.1);
-                counters.1 += 1;
+                
+                let (prefix, op, count_ref) = match node.kind {
+                    NodeKind::Add => ("add", IROp::Add(a_name, b_name), &mut counters.1),
+                    NodeKind::Sub => ("sub", IROp::Sub(a_name, b_name), &mut counters.2),
+                    NodeKind::Mul => ("mul", IROp::Mul(a_name, b_name), &mut counters.3),
+                    NodeKind::Div => ("div", IROp::Div(a_name, b_name), &mut counters.4),
+                    _ => unreachable!(),
+                };
+                
+                let name = format!("{}_{}", prefix, *count_ref);
+                *count_ref += 1;
+                
                 out.push(IRStmt::Compute(IRStatement {
                     var_name: name.clone(),
                     ir_type: IRType::Number,
-                    op: IROp::Add(a_name, b_name),
+                    op,
                 }));
                 var_names.insert(node_id, (name.clone(), IRType::Number));
                 Some((name, IRType::Number))
@@ -1476,6 +1526,18 @@ impl eframe::App for BlockoApp {
                 ui.add_space(4.0);
                 if ui.add(egui::Button::new("Add Math (Add)").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
                     self.add_node(NodeKind::Add);
+                }
+                ui.add_space(4.0);
+                if ui.add(egui::Button::new("Add Math (Subtract)").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
+                    self.add_node(NodeKind::Sub);
+                }
+                ui.add_space(4.0);
+                if ui.add(egui::Button::new("Add Math (Multiply)").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
+                    self.add_node(NodeKind::Mul);
+                }
+                ui.add_space(4.0);
+                if ui.add(egui::Button::new("Add Math (Divide)").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
+                    self.add_node(NodeKind::Div);
                 }
                 ui.add_space(4.0);
                 if ui.add(egui::Button::new("Add Print").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
