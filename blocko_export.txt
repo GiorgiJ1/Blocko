@@ -1,0 +1,4 @@
+fn main() {
+    let num_0 = 5.0;
+    println!("{}", num_0);
+}

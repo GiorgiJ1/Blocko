@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "next_id": 8,
+  "nodes": [
+    {
+      "id": 4,
+      "kind": {
+        "Number": 6.5
+      },
+      "x": 60.0,
+      "y": 60.0
+    },
+    {
+      "id": 5,
+      "kind": {
+        "Number": 8.0
+      },
+      "x": 67.0,
+      "y": 141.0
+    },
+    {
+      "id": 6,
+      "kind": {
+        "Compare": "GreaterThan"
+      },
+      "x": 281.0,
+      "y": 109.0
+    },
+    {
+      "id": 7,
+      "kind": "Print",
+      "x": 584.0,
+      "y": 131.0
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "node_id": 4,
+        "kind": "Output",
+        "index": 0
+      },
+      "to": {
+        "node_id": 6,
+        "kind": "Input",
+        "index": 0
+      }
+    },
+    {
+      "from": {
+        "node_id": 5,
+        "kind": "Output",
+        "index": 0
+      },
+      "to": {
+        "node_id": 6,
+        "kind": "Input",
+        "index": 1
+      }
+    },
+    {
+      "from": {
+        "node_id": 6,
+        "kind": "Output",
+        "index": 0
+      },
+      "to": {
+        "node_id": 7,
+        "kind": "Input",
+        "index": 0
+      }
+    }
+  ]
+}
