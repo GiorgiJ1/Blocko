@@ -1,11 +1,11 @@
 use eframe::egui;
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use egui::epaint::CubicBezierShape;
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 type NodeId = u64;
-type Counters = (usize, usize, usize, usize, usize);
+type Counters = (usize, usize, usize, usize, usize, usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum CompareOp {
@@ -50,6 +50,9 @@ enum NodeKind {
     Print,
     Compare(CompareOp),
     Branch,
+    And,
+    Or,
+    Not,
     Start,
     SetVariable(String),
     GetVariable(String),
@@ -78,6 +81,9 @@ impl NodeKind {
             NodeKind::Print => "Print",
             NodeKind::Compare(_) => "Compare",
             NodeKind::Branch => "If / Else",
+            NodeKind::And => "Logic (AND)",
+            NodeKind::Or => "Logic (OR)",
+            NodeKind::Not => "Logic (NOT)",
             NodeKind::Start => "Start",
             NodeKind::SetVariable(_) => "Set Variable",
             NodeKind::GetVariable(_) => "Get Variable",
@@ -91,13 +97,12 @@ impl NodeKind {
     fn input_labels(&self) -> Vec<&'static str> {
         match self {
             NodeKind::Number(_) => vec![],
-            NodeKind::Add
-            | NodeKind::Sub
-            | NodeKind::Mul
-            | NodeKind::Div => vec!["A", "B"],
+            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => vec!["A", "B"],
             NodeKind::Print => vec!["In"],
             NodeKind::Compare(_) => vec!["A", "B"],
             NodeKind::Branch => vec!["Cond", "Then", "Else"],
+            NodeKind::And | NodeKind::Or => vec!["A", "B"],
+            NodeKind::Not => vec!["A"],
             NodeKind::Start => vec![],
             NodeKind::SetVariable(_) => vec!["Value"],
             NodeKind::GetVariable(_) => vec![],
@@ -115,6 +120,7 @@ impl NodeKind {
             NodeKind::Print => vec![],
             NodeKind::Compare(_) => vec!["Result"],
             NodeKind::Branch => vec!["Result"],
+            NodeKind::And | NodeKind::Or | NodeKind::Not => vec!["Result"],
             NodeKind::Start => vec![],
             NodeKind::SetVariable(_) => vec![],
             NodeKind::GetVariable(_) => vec!["Value"],
@@ -128,10 +134,14 @@ impl NodeKind {
     fn input_types(&self) -> Vec<PinDataType> {
         match self {
             NodeKind::Number(_) => vec![],
-            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => vec![PinDataType::Number, PinDataType::Number],
+            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => {
+                vec![PinDataType::Number, PinDataType::Number]
+            }
             NodeKind::Print => vec![PinDataType::Any],
             NodeKind::Compare(_) => vec![PinDataType::Number, PinDataType::Number],
             NodeKind::Branch => vec![PinDataType::Bool, PinDataType::Number, PinDataType::Number],
+            NodeKind::And | NodeKind::Or => vec![PinDataType::Bool, PinDataType::Bool],
+            NodeKind::Not => vec![PinDataType::Bool],
             NodeKind::Start => vec![],
             NodeKind::SetVariable(_) => vec![PinDataType::Number],
             NodeKind::GetVariable(_) => vec![],
@@ -145,10 +155,13 @@ impl NodeKind {
     fn output_types(&self) -> Vec<PinDataType> {
         match self {
             NodeKind::Number(_) => vec![PinDataType::Number],
-            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => vec![PinDataType::Number],
+            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => {
+                vec![PinDataType::Number]
+            }
             NodeKind::Print => vec![],
             NodeKind::Compare(_) => vec![PinDataType::Bool],
             NodeKind::Branch => vec![PinDataType::Number],
+            NodeKind::And | NodeKind::Or | NodeKind::Not => vec![PinDataType::Bool],
             NodeKind::Start => vec![],
             NodeKind::SetVariable(_) => vec![],
             NodeKind::GetVariable(_) => vec![PinDataType::Number],
@@ -279,6 +292,9 @@ enum IROp {
     Mul(String, String),
     Div(String, String),
     Compare(CompareOp, String, String),
+    And(String, String),
+    Or(String, String),
+    Not(String),
     Branch {
         cond: String,
         then_val: String,
@@ -297,8 +313,13 @@ struct IRStatement {
 #[derive(Debug, Clone)]
 enum IRStmt {
     Compute(IRStatement),
-    SetVar { name: String, value_var: String },
-    Print { value_var: String },
+    SetVar {
+        name: String,
+        value_var: String,
+    },
+    Print {
+        value_var: String,
+    },
     Comment(String),
     While {
         cond_lines: Vec<IRStmt>,
@@ -357,29 +378,57 @@ fn emit_python_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>) {
     for stmt in stmts {
         match stmt {
             IRStmt::Compute(s) => match &s.op {
-                IROp::Literal(v) => lines.push(format!("{}{} = {}", pad, s.var_name, format_literal(*v))),
+                IROp::Literal(v) => {
+                    lines.push(format!("{}{} = {}", pad, s.var_name, format_literal(*v)))
+                }
                 IROp::Add(a, b) => lines.push(format!("{}{} = {} + {}", pad, s.var_name, a, b)),
                 IROp::Sub(a, b) => lines.push(format!("{}{} = {} - {}", pad, s.var_name, a, b)),
                 IROp::Mul(a, b) => lines.push(format!("{}{} = {} * {}", pad, s.var_name, a, b)),
                 IROp::Div(a, b) => lines.push(format!("{}{} = {} / {}", pad, s.var_name, a, b)),
-                IROp::Compare(op, a, b) => {
-                    lines.push(format!("{}{} = {} {} {}", pad, s.var_name, a, op.symbol(), b))
-                }
-                IROp::Branch { cond, then_val, else_val } => {
+                IROp::Compare(op, a, b) => lines.push(format!(
+                    "{}{} = {} {} {}",
+                    pad,
+                    s.var_name,
+                    a,
+                    op.symbol(),
+                    b
+                )),
+                IROp::And(a, b) => lines.push(format!("{}{} = {} and {}", pad, s.var_name, a, b)),
+                IROp::Or(a, b) => lines.push(format!("{}{} = {} or {}", pad, s.var_name, a, b)),
+                IROp::Not(a) => lines.push(format!("{}{} = not {}", pad, s.var_name, a)),
+                IROp::Branch {
+                    cond,
+                    then_val,
+                    else_val,
+                } => {
                     lines.push(format!("{}if {}:", pad, cond));
                     lines.push(format!("{}    {} = {}", pad, s.var_name, then_val));
                     lines.push(format!("{}else:", pad));
                     lines.push(format!("{}    {} = {}", pad, s.var_name, else_val));
                 }
             },
-            IRStmt::SetVar { name, value_var } => lines.push(format!("{}{} = {}", pad, name, value_var)),
+            IRStmt::SetVar { name, value_var } => {
+                lines.push(format!("{}{} = {}", pad, name, value_var))
+            }
             IRStmt::Print { value_var } => lines.push(format!("{}print({})", pad, value_var)),
             IRStmt::Comment(msg) => lines.push(format!("{}# {}", pad, msg)),
-            IRStmt::CallFunction { var_name, func_name, args } => {
-                lines.push(format!("{}{} = {}({})", pad, var_name, func_name, args.join(", ")))
-            }
+            IRStmt::CallFunction {
+                var_name,
+                func_name,
+                args,
+            } => lines.push(format!(
+                "{}{} = {}({})",
+                pad,
+                var_name,
+                func_name,
+                args.join(", ")
+            )),
             IRStmt::Return(v) => lines.push(format!("{}return {}", pad, v)),
-            IRStmt::While { cond_lines, cond_var, body } => {
+            IRStmt::While {
+                cond_lines,
+                cond_var,
+                body,
+            } => {
                 lines.push(format!("{}while True:", pad));
                 emit_python_stmts(cond_lines, indent + 1, lines);
                 lines.push(format!("{}    if not ({}):", pad, cond_var));
@@ -405,7 +454,10 @@ fn emit_python(functions: &[IRFunction], main_stmts: &[IRStmt]) -> String {
 
     if main_stmts.is_empty() && functions.is_empty() {
         lines.push("# Your generated code will appear here.".to_string());
-        lines.push("# Add Start, Set Variable, Print, and While Loop nodes to see Python code.".to_string());
+        lines.push(
+            "# Add Start, Set Variable, Print, and While Loop nodes to see Python code."
+                .to_string(),
+        );
     } else {
         emit_python_stmts(main_stmts, 0, &mut lines);
     }
@@ -413,20 +465,54 @@ fn emit_python(functions: &[IRFunction], main_stmts: &[IRStmt]) -> String {
     lines.join("\n")
 }
 
-fn emit_rust_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, declared: &mut HashSet<String>) {
+fn emit_rust_stmts(
+    stmts: &[IRStmt],
+    indent: usize,
+    lines: &mut Vec<String>,
+    declared: &mut HashSet<String>,
+) {
     let pad = "    ".repeat(indent);
     for stmt in stmts {
         match stmt {
             IRStmt::Compute(s) => match &s.op {
-                IROp::Literal(v) => lines.push(format!("{}let {} = {};", pad, s.var_name, format_literal(*v))),
-                IROp::Add(a, b) => lines.push(format!("{}let {} = {} + {};", pad, s.var_name, a, b)),
-                IROp::Sub(a, b) => lines.push(format!("{}let {} = {} - {};", pad, s.var_name, a, b)),
-                IROp::Mul(a, b) => lines.push(format!("{}let {} = {} * {};", pad, s.var_name, a, b)),
-                IROp::Div(a, b) => lines.push(format!("{}let {} = {} / {};", pad, s.var_name, a, b)),
-                IROp::Compare(op, a, b) => {
-                    lines.push(format!("{}let {} = {} {} {};", pad, s.var_name, a, op.symbol(), b))
+                IROp::Literal(v) => lines.push(format!(
+                    "{}let {} = {};",
+                    pad,
+                    s.var_name,
+                    format_literal(*v)
+                )),
+                IROp::Add(a, b) => {
+                    lines.push(format!("{}let {} = {} + {};", pad, s.var_name, a, b))
                 }
-                IROp::Branch { cond, then_val, else_val } => {
+                IROp::Sub(a, b) => {
+                    lines.push(format!("{}let {} = {} - {};", pad, s.var_name, a, b))
+                }
+                IROp::Mul(a, b) => {
+                    lines.push(format!("{}let {} = {} * {};", pad, s.var_name, a, b))
+                }
+                IROp::Div(a, b) => {
+                    lines.push(format!("{}let {} = {} / {};", pad, s.var_name, a, b))
+                }
+                IROp::Compare(op, a, b) => lines.push(format!(
+                    "{}let {} = {} {} {};",
+                    pad,
+                    s.var_name,
+                    a,
+                    op.symbol(),
+                    b
+                )),
+                IROp::And(a, b) => {
+                    lines.push(format!("{}let {} = {} && {};", pad, s.var_name, a, b))
+                }
+                IROp::Or(a, b) => {
+                    lines.push(format!("{}let {} = {} || {};", pad, s.var_name, a, b))
+                }
+                IROp::Not(a) => lines.push(format!("{}let {} = !{};", pad, s.var_name, a)),
+                IROp::Branch {
+                    cond,
+                    then_val,
+                    else_val,
+                } => {
                     lines.push(format!("{}let {} = if {} {{", pad, s.var_name, cond));
                     lines.push(format!("{}    {}", pad, then_val));
                     lines.push(format!("{}}} else {{", pad));
@@ -442,13 +528,27 @@ fn emit_rust_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, dec
                     lines.push(format!("{}let mut {} = {};", pad, name, value_var));
                 }
             }
-            IRStmt::Print { value_var } => lines.push(format!("{}println!(\"{{}}\", {});", pad, value_var)),
-            IRStmt::Comment(msg) => lines.push(format!("{}// {}", pad, msg)),
-            IRStmt::CallFunction { var_name, func_name, args } => {
-                lines.push(format!("{}let {} = {}({});", pad, var_name, func_name, args.join(", ")))
+            IRStmt::Print { value_var } => {
+                lines.push(format!("{}println!(\"{{}}\", {});", pad, value_var))
             }
+            IRStmt::Comment(msg) => lines.push(format!("{}// {}", pad, msg)),
+            IRStmt::CallFunction {
+                var_name,
+                func_name,
+                args,
+            } => lines.push(format!(
+                "{}let {} = {}({});",
+                pad,
+                var_name,
+                func_name,
+                args.join(", ")
+            )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
-            IRStmt::While { cond_lines, cond_var, body } => {
+            IRStmt::While {
+                cond_lines,
+                cond_var,
+                body,
+            } => {
                 lines.push(format!("{}loop {{", pad));
                 emit_rust_stmts(cond_lines, indent + 1, lines, declared);
                 lines.push(format!("{}    if !({}) {{ break; }}", pad, cond_var));
@@ -464,7 +564,11 @@ fn emit_rust(functions: &[IRFunction], main_stmts: &[IRStmt]) -> String {
 
     for func in functions {
         let params_sig: Vec<String> = func.params.iter().map(|p| format!("{}: f64", p)).collect();
-        out.push_str(&format!("fn {}({}) -> f64 {{\n", func.name, params_sig.join(", ")));
+        out.push_str(&format!(
+            "fn {}({}) -> f64 {{\n",
+            func.name,
+            params_sig.join(", ")
+        ));
         let mut body_lines = Vec::new();
         let mut declared = HashSet::new();
         emit_rust_stmts(&func.body, 1, &mut body_lines, &mut declared);
@@ -493,20 +597,54 @@ fn emit_rust(functions: &[IRFunction], main_stmts: &[IRStmt]) -> String {
     out
 }
 
-fn emit_js_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, declared: &mut HashSet<String>) {
+fn emit_js_stmts(
+    stmts: &[IRStmt],
+    indent: usize,
+    lines: &mut Vec<String>,
+    declared: &mut HashSet<String>,
+) {
     let pad = "  ".repeat(indent);
     for stmt in stmts {
         match stmt {
             IRStmt::Compute(s) => match &s.op {
-                IROp::Literal(v) => lines.push(format!("{}let {} = {};", pad, s.var_name, format_literal(*v))),
-                IROp::Add(a, b) => lines.push(format!("{}let {} = {} + {};", pad, s.var_name, a, b)),
-                IROp::Sub(a, b) => lines.push(format!("{}let {} = {} - {};", pad, s.var_name, a, b)),
-                IROp::Mul(a, b) => lines.push(format!("{}let {} = {} * {};", pad, s.var_name, a, b)),
-                IROp::Div(a, b) => lines.push(format!("{}let {} = {} / {};", pad, s.var_name, a, b)),
-                IROp::Compare(op, a, b) => {
-                    lines.push(format!("{}let {} = {} {} {};", pad, s.var_name, a, op.symbol(), b))
+                IROp::Literal(v) => lines.push(format!(
+                    "{}let {} = {};",
+                    pad,
+                    s.var_name,
+                    format_literal(*v)
+                )),
+                IROp::Add(a, b) => {
+                    lines.push(format!("{}let {} = {} + {};", pad, s.var_name, a, b))
                 }
-                IROp::Branch { cond, then_val, else_val } => {
+                IROp::Sub(a, b) => {
+                    lines.push(format!("{}let {} = {} - {};", pad, s.var_name, a, b))
+                }
+                IROp::Mul(a, b) => {
+                    lines.push(format!("{}let {} = {} * {};", pad, s.var_name, a, b))
+                }
+                IROp::Div(a, b) => {
+                    lines.push(format!("{}let {} = {} / {};", pad, s.var_name, a, b))
+                }
+                IROp::Compare(op, a, b) => lines.push(format!(
+                    "{}let {} = {} {} {};",
+                    pad,
+                    s.var_name,
+                    a,
+                    op.symbol(),
+                    b
+                )),
+                IROp::And(a, b) => {
+                    lines.push(format!("{}let {} = {} && {};", pad, s.var_name, a, b))
+                }
+                IROp::Or(a, b) => {
+                    lines.push(format!("{}let {} = {} || {};", pad, s.var_name, a, b))
+                }
+                IROp::Not(a) => lines.push(format!("{}let {} = !{};", pad, s.var_name, a)),
+                IROp::Branch {
+                    cond,
+                    then_val,
+                    else_val,
+                } => {
                     lines.push(format!("{}let {};", pad, s.var_name));
                     lines.push(format!("{}if ({}) {{", pad, cond));
                     lines.push(format!("{}  {} = {};", pad, s.var_name, then_val));
@@ -523,13 +661,27 @@ fn emit_js_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, decla
                     lines.push(format!("{}let {} = {};", pad, name, value_var));
                 }
             }
-            IRStmt::Print { value_var } => lines.push(format!("{}console.log({});", pad, value_var)),
-            IRStmt::Comment(msg) => lines.push(format!("{}// {}", pad, msg)),
-            IRStmt::CallFunction { var_name, func_name, args } => {
-                lines.push(format!("{}let {} = {}({});", pad, var_name, func_name, args.join(", ")))
+            IRStmt::Print { value_var } => {
+                lines.push(format!("{}console.log({});", pad, value_var))
             }
+            IRStmt::Comment(msg) => lines.push(format!("{}// {}", pad, msg)),
+            IRStmt::CallFunction {
+                var_name,
+                func_name,
+                args,
+            } => lines.push(format!(
+                "{}let {} = {}({});",
+                pad,
+                var_name,
+                func_name,
+                args.join(", ")
+            )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
-            IRStmt::While { cond_lines, cond_var, body } => {
+            IRStmt::While {
+                cond_lines,
+                cond_var,
+                body,
+            } => {
                 lines.push(format!("{}while (true) {{", pad));
                 emit_js_stmts(cond_lines, indent + 1, lines, declared);
                 lines.push(format!("{}  if (!({})) break;", pad, cond_var));
@@ -544,7 +696,11 @@ fn emit_javascript(functions: &[IRFunction], main_stmts: &[IRStmt]) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     for func in functions {
-        lines.push(format!("function {}({}) {{", func.name, func.params.join(", ")));
+        lines.push(format!(
+            "function {}({}) {{",
+            func.name,
+            func.params.join(", ")
+        ));
         let mut declared = HashSet::new();
         emit_js_stmts(&func.body, 1, &mut lines, &mut declared);
         lines.push("}".to_string());
@@ -553,7 +709,10 @@ fn emit_javascript(functions: &[IRFunction], main_stmts: &[IRStmt]) -> String {
 
     if main_stmts.is_empty() && functions.is_empty() {
         lines.push("// Your generated code will appear here.".to_string());
-        lines.push("// Add Start, Set Variable, Print, and While Loop nodes to see JavaScript code.".to_string());
+        lines.push(
+            "// Add Start, Set Variable, Print, and While Loop nodes to see JavaScript code."
+                .to_string(),
+        );
     } else {
         let mut declared = HashSet::new();
         emit_js_stmts(main_stmts, 0, &mut lines, &mut declared);
@@ -562,20 +721,54 @@ fn emit_javascript(functions: &[IRFunction], main_stmts: &[IRStmt]) -> String {
     lines.join("\n")
 }
 
-fn emit_cpp_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, declared: &mut HashSet<String>) {
+fn emit_cpp_stmts(
+    stmts: &[IRStmt],
+    indent: usize,
+    lines: &mut Vec<String>,
+    declared: &mut HashSet<String>,
+) {
     let pad = "    ".repeat(indent);
     for stmt in stmts {
         match stmt {
             IRStmt::Compute(s) => match &s.op {
-                IROp::Literal(v) => lines.push(format!("{}auto {} = {};", pad, s.var_name, format_literal(*v))),
-                IROp::Add(a, b) => lines.push(format!("{}auto {} = {} + {};", pad, s.var_name, a, b)),
-                IROp::Sub(a, b) => lines.push(format!("{}auto {} = {} - {};", pad, s.var_name, a, b)),
-                IROp::Mul(a, b) => lines.push(format!("{}auto {} = {} * {};", pad, s.var_name, a, b)),
-                IROp::Div(a, b) => lines.push(format!("{}auto {} = {} / {};", pad, s.var_name, a, b)),
-                IROp::Compare(op, a, b) => {
-                    lines.push(format!("{}auto {} = {} {} {};", pad, s.var_name, a, op.symbol(), b))
+                IROp::Literal(v) => lines.push(format!(
+                    "{}auto {} = {};",
+                    pad,
+                    s.var_name,
+                    format_literal(*v)
+                )),
+                IROp::Add(a, b) => {
+                    lines.push(format!("{}auto {} = {} + {};", pad, s.var_name, a, b))
                 }
-                IROp::Branch { cond, then_val, else_val } => {
+                IROp::Sub(a, b) => {
+                    lines.push(format!("{}auto {} = {} - {};", pad, s.var_name, a, b))
+                }
+                IROp::Mul(a, b) => {
+                    lines.push(format!("{}auto {} = {} * {};", pad, s.var_name, a, b))
+                }
+                IROp::Div(a, b) => {
+                    lines.push(format!("{}auto {} = {} / {};", pad, s.var_name, a, b))
+                }
+                IROp::Compare(op, a, b) => lines.push(format!(
+                    "{}auto {} = {} {} {};",
+                    pad,
+                    s.var_name,
+                    a,
+                    op.symbol(),
+                    b
+                )),
+                IROp::And(a, b) => {
+                    lines.push(format!("{}auto {} = {} && {};", pad, s.var_name, a, b))
+                }
+                IROp::Or(a, b) => {
+                    lines.push(format!("{}auto {} = {} || {};", pad, s.var_name, a, b))
+                }
+                IROp::Not(a) => lines.push(format!("{}auto {} = !{};", pad, s.var_name, a)),
+                IROp::Branch {
+                    cond,
+                    then_val,
+                    else_val,
+                } => {
                     lines.push(format!(
                         "{}auto {} = ({}) ? ({}) : ({});",
                         pad, s.var_name, cond, then_val, else_val
@@ -594,11 +787,23 @@ fn emit_cpp_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>, decl
                 lines.push(format!("{}std::cout << {} << std::endl;", pad, value_var))
             }
             IRStmt::Comment(msg) => lines.push(format!("{}// {}", pad, msg)),
-            IRStmt::CallFunction { var_name, func_name, args } => {
-                lines.push(format!("{}auto {} = {}({});", pad, var_name, func_name, args.join(", ")))
-            }
+            IRStmt::CallFunction {
+                var_name,
+                func_name,
+                args,
+            } => lines.push(format!(
+                "{}auto {} = {}({});",
+                pad,
+                var_name,
+                func_name,
+                args.join(", ")
+            )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
-            IRStmt::While { cond_lines, cond_var, body } => {
+            IRStmt::While {
+                cond_lines,
+                cond_var,
+                body,
+            } => {
                 lines.push(format!("{}while (true) {{", pad));
                 emit_cpp_stmts(cond_lines, indent + 1, lines, declared);
                 lines.push(format!("{}    if (!({})) break;", pad, cond_var));
@@ -614,8 +819,16 @@ fn emit_cpp(functions: &[IRFunction], main_stmts: &[IRStmt]) -> String {
     out.push_str("#include <iostream>\n\n");
 
     for func in functions {
-        let params_sig: Vec<String> = func.params.iter().map(|p| format!("double {}", p)).collect();
-        out.push_str(&format!("double {}({}) {{\n", func.name, params_sig.join(", ")));
+        let params_sig: Vec<String> = func
+            .params
+            .iter()
+            .map(|p| format!("double {}", p))
+            .collect();
+        out.push_str(&format!(
+            "double {}({}) {{\n",
+            func.name,
+            params_sig.join(", ")
+        ));
         let mut body_lines = Vec::new();
         let mut declared = HashSet::new();
         emit_cpp_stmts(&func.body, 1, &mut body_lines, &mut declared);
@@ -652,6 +865,269 @@ const PIN_RADIUS: f32 = 6.0;
 const PROJECT_FILE: &str = "blocko_project.json";
 const MAX_EXEC_STEPS: u32 = 20_000;
 
+mod theme {
+    use egui::Color32;
+
+    pub const BG_APP: Color32 = Color32::from_rgb(15, 15, 17);
+    pub const BG_PANEL: Color32 = Color32::from_rgb(20, 20, 23);
+    pub const BG_NODE: Color32 = Color32::from_rgb(31, 31, 36);
+    pub const BG_NODE_HEADER: Color32 = Color32::from_rgb(41, 42, 50);
+    pub const BG_INACTIVE_WIDGET: Color32 = Color32::from_rgb(34, 34, 40);
+    pub const BG_HOVER_WIDGET: Color32 = Color32::from_rgb(44, 44, 52);
+    pub const BG_ACTIVE_WIDGET: Color32 = Color32::from_rgb(50, 50, 60);
+    pub const BORDER: Color32 = Color32::from_rgb(58, 58, 66);
+    pub const BORDER_SOFT: Color32 = Color32::from_rgb(42, 42, 48);
+
+    pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(230, 230, 236);
+    pub const TEXT_MUTED: Color32 = Color32::from_rgb(140, 140, 150);
+
+    pub const ACCENT_NUMBERS: Color32 = Color32::from_rgb(240, 190, 90);
+    pub const ACCENT_LOGIC: Color32 = Color32::from_rgb(190, 130, 240);
+    pub const ACCENT_FLOW: Color32 = Color32::from_rgb(225, 225, 232);
+    pub const ACCENT_FUNCTIONS: Color32 = Color32::from_rgb(110, 220, 160);
+    pub const ACCENT_PROJECT: Color32 = Color32::from_rgb(240, 150, 90);
+
+    pub const PIN_NUMBER: Color32 = Color32::from_rgb(100, 170, 240);
+    pub const PIN_BOOL: Color32 = Color32::from_rgb(190, 130, 240);
+    pub const PIN_ANY: Color32 = Color32::from_rgb(175, 175, 182);
+    pub const PIN_EXEC: Color32 = Color32::from_rgb(235, 235, 240);
+
+    pub const CONSOLE_TIME: Color32 = Color32::from_rgb(120, 120, 130);
+    pub const CONSOLE_OK: Color32 = Color32::from_rgb(110, 220, 140);
+    pub const CONSOLE_ERR: Color32 = Color32::from_rgb(235, 100, 100);
+
+    pub const CODE_KEYWORD: Color32 = Color32::from_rgb(200, 140, 230);
+    pub const CODE_STRING: Color32 = Color32::from_rgb(150, 210, 140);
+    pub const CODE_NUMBER: Color32 = Color32::from_rgb(220, 180, 110);
+    pub const CODE_COMMENT: Color32 = Color32::from_rgb(110, 110, 120);
+    pub const CODE_DEFAULT: Color32 = Color32::from_rgb(215, 215, 222);
+    pub const LINE_NUMBER: Color32 = Color32::from_rgb(90, 90, 100);
+}
+
+fn is_input_connected(connections: &[Connection], pin: PinRef) -> bool {
+    connections.iter().any(|c| c.to == pin)
+}
+
+fn is_output_connected(connections: &[Connection], pin: PinRef) -> bool {
+    connections.iter().any(|c| c.from == pin)
+}
+
+fn draw_pin(painter: &egui::Painter, pos: Pos2, color: Color32, connected: bool) {
+    if connected {
+        painter.circle_filled(pos, PIN_RADIUS, color);
+        painter.circle_stroke(
+            pos,
+            PIN_RADIUS,
+            Stroke::new(1.0, Color32::from_black_alpha(90)),
+        );
+    } else {
+        painter.circle_filled(pos, PIN_RADIUS, theme::BG_NODE);
+        painter.circle_stroke(pos, PIN_RADIUS, Stroke::new(1.6, color));
+    }
+}
+
+fn toolbox_button(ui: &mut egui::Ui, icon_color: Color32, label: &str) -> bool {
+    let desired_size = egui::vec2(ui.available_width(), 30.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let bg = if response.hovered() {
+            theme::BG_HOVER_WIDGET
+        } else {
+            Color32::TRANSPARENT
+        };
+        painter.rect_filled(rect, 6.0, bg);
+        let icon_center = Pos2::new(rect.left() + 16.0, rect.center().y);
+        painter.circle_filled(icon_center, 4.0, icon_color);
+        painter.text(
+            Pos2::new(rect.left() + 30.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(13.5),
+            theme::TEXT_PRIMARY,
+        );
+    }
+    response.clicked()
+}
+
+fn section_header(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(12.0);
+    ui.label(
+        egui::RichText::new(title.to_uppercase())
+            .size(11.0)
+            .color(theme::TEXT_MUTED)
+            .strong(),
+    );
+    ui.add_space(4.0);
+}
+
+fn code_language_keywords(lang: TargetLanguage) -> &'static [&'static str] {
+    match lang {
+        TargetLanguage::Python => &[
+            "def", "if", "else", "elif", "while", "for", "return", "print", "True", "False",
+            "None", "and", "or", "not", "in", "break", "continue", "pass",
+        ],
+        TargetLanguage::Rust => &[
+            "fn", "let", "mut", "if", "else", "while", "loop", "return", "break", "true", "false",
+            "struct", "enum", "match", "for", "in",
+        ],
+        TargetLanguage::JavaScript => &[
+            "function", "let", "const", "var", "if", "else", "while", "for", "return", "true",
+            "false", "break", "continue", "console",
+        ],
+        TargetLanguage::Cpp => &[
+            "int", "double", "auto", "if", "else", "while", "for", "return", "true", "false",
+            "std", "cout", "endl", "include",
+        ],
+    }
+}
+
+fn classify_token(text: &str, keywords: &[&str]) -> Color32 {
+    if text
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        theme::CODE_NUMBER
+    } else if keywords.contains(&text) {
+        theme::CODE_KEYWORD
+    } else {
+        theme::CODE_DEFAULT
+    }
+}
+
+fn highlight_code_line(line: &str, keywords: &[&str]) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+
+    let font_id = egui::FontId::monospace(13.0);
+    let mut job = LayoutJob::default();
+
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") || trimmed.starts_with('#') {
+        job.append(
+            line,
+            0.0,
+            TextFormat {
+                font_id,
+                color: theme::CODE_COMMENT,
+                ..Default::default()
+            },
+        );
+        return job;
+    }
+
+    let mut buf = String::new();
+    let mut in_string = false;
+
+    for ch in line.chars() {
+        if in_string {
+            buf.push(ch);
+            if ch == '"' {
+                job.append(
+                    &buf,
+                    0.0,
+                    TextFormat {
+                        font_id: font_id.clone(),
+                        color: theme::CODE_STRING,
+                        ..Default::default()
+                    },
+                );
+                buf.clear();
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            if !buf.is_empty() {
+                let color = classify_token(&buf, keywords);
+                job.append(
+                    &buf,
+                    0.0,
+                    TextFormat {
+                        font_id: font_id.clone(),
+                        color,
+                        ..Default::default()
+                    },
+                );
+                buf.clear();
+            }
+            buf.push(ch);
+            in_string = true;
+            continue;
+        }
+        if ch.is_alphanumeric() || ch == '_' || ch == '!' {
+            buf.push(ch);
+        } else {
+            if !buf.is_empty() {
+                let color = classify_token(&buf, keywords);
+                job.append(
+                    &buf,
+                    0.0,
+                    TextFormat {
+                        font_id: font_id.clone(),
+                        color,
+                        ..Default::default()
+                    },
+                );
+                buf.clear();
+            }
+            job.append(
+                &ch.to_string(),
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color: theme::CODE_DEFAULT,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    if !buf.is_empty() {
+        let color = classify_token(&buf, keywords);
+        job.append(
+            &buf,
+            0.0,
+            TextFormat {
+                font_id,
+                color,
+                ..Default::default()
+            },
+        );
+    }
+
+    job
+}
+
+fn code_preview_view(ui: &mut egui::Ui, code: &str, lang: TargetLanguage) {
+    let keywords = code_language_keywords(lang);
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(13, 13, 15))
+                .inner_margin(egui::Margin::symmetric(10.0, 10.0))
+                .rounding(egui::Rounding::same(6.0))
+                .show(ui, |ui| {
+                    for (i, line) in code.lines().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [26.0, 16.0],
+                                egui::Label::new(
+                                    egui::RichText::new(format!("{}", i + 1))
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(theme::LINE_NUMBER),
+                                ),
+                            );
+                            let job = highlight_code_line(line, keywords);
+                            ui.label(job);
+                        });
+                    }
+                });
+        });
+}
+
 #[derive(Serialize, Deserialize)]
 struct SerializableNode {
     id: NodeId,
@@ -680,7 +1156,22 @@ fn main() -> eframe::Result<()> {
         "Blocko",
         native_options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            let mut visuals = egui::Visuals::dark();
+            visuals.window_fill = theme::BG_APP;
+            visuals.panel_fill = theme::BG_PANEL;
+            visuals.widgets.noninteractive.bg_fill = theme::BG_PANEL;
+            visuals.widgets.inactive.bg_fill = theme::BG_INACTIVE_WIDGET;
+            visuals.widgets.hovered.bg_fill = theme::BG_HOVER_WIDGET;
+            visuals.widgets.active.bg_fill = theme::BG_ACTIVE_WIDGET;
+            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, theme::BORDER_SOFT);
+            visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, theme::BORDER);
+            visuals.selection.bg_fill = Color32::from_rgb(70, 100, 190);
+            visuals.window_rounding = egui::Rounding::same(8.0);
+            visuals.widgets.noninteractive.rounding = egui::Rounding::same(6.0);
+            visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
+            visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+            visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+            cc.egui_ctx.set_visuals(visuals);
             Ok(Box::new(BlockoApp::new()))
         }),
     )
@@ -724,9 +1215,15 @@ impl BlockoApp {
 
     fn node_height(kind: &NodeKind) -> f32 {
         let data_rows = kind.input_labels().len().max(kind.output_labels().len());
-        let exec_rows = kind.exec_input_labels().len().max(kind.exec_output_labels().len());
+        let exec_rows = kind
+            .exec_input_labels()
+            .len()
+            .max(kind.exec_output_labels().len());
         let total_rows = (data_rows + exec_rows).max(1);
-        TITLE_HEIGHT + kind.widget_extra_height() + total_rows as f32 * ROW_HEIGHT + BODY_PADDING * 2.0
+        TITLE_HEIGHT
+            + kind.widget_extra_height()
+            + total_rows as f32 * ROW_HEIGHT
+            + BODY_PADDING * 2.0
     }
 
     fn remove_connections_for(&mut self, node_id: NodeId) {
@@ -741,7 +1238,10 @@ impl BlockoApp {
             index: input_index,
             is_exec: false,
         };
-        self.connections.iter().find(|c| c.to == target).map(|c| c.from)
+        self.connections
+            .iter()
+            .find(|c| c.to == target)
+            .map(|c| c.from)
     }
 
     fn find_exec_target(&self, node_id: NodeId, output_index: usize) -> Option<NodeId> {
@@ -751,7 +1251,10 @@ impl BlockoApp {
             index: output_index,
             is_exec: true,
         };
-        self.connections.iter().find(|c| c.from == target).map(|c| c.to.node_id)
+        self.connections
+            .iter()
+            .find(|c| c.from == target)
+            .map(|c| c.to.node_id)
     }
 
     fn find_start_node(&self) -> Option<NodeId> {
@@ -785,8 +1288,12 @@ impl BlockoApp {
             NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => {
                 let a_source = self.find_source_for_input(node_id, 0)?;
                 let b_source = self.find_source_for_input(node_id, 1)?;
-                let a_val = self.evaluate_output(a_source.node_id, visiting, variables, call_cache)?.as_number()?;
-                let b_val = self.evaluate_output(b_source.node_id, visiting, variables, call_cache)?.as_number()?;
+                let a_val = self
+                    .evaluate_output(a_source.node_id, visiting, variables, call_cache)?
+                    .as_number()?;
+                let b_val = self
+                    .evaluate_output(b_source.node_id, visiting, variables, call_cache)?
+                    .as_number()?;
                 let result = match &node.kind {
                     NodeKind::Add => a_val + b_val,
                     NodeKind::Sub => a_val - b_val,
@@ -805,20 +1312,69 @@ impl BlockoApp {
             NodeKind::Compare(op) => {
                 let a_source = self.find_source_for_input(node_id, 0)?;
                 let b_source = self.find_source_for_input(node_id, 1)?;
-                let a_val = self.evaluate_output(a_source.node_id, visiting, variables, call_cache)?.as_number()?;
-                let b_val = self.evaluate_output(b_source.node_id, visiting, variables, call_cache)?.as_number()?;
+                let a_val = self
+                    .evaluate_output(a_source.node_id, visiting, variables, call_cache)?
+                    .as_number()?;
+                let b_val = self
+                    .evaluate_output(b_source.node_id, visiting, variables, call_cache)?
+                    .as_number()?;
                 Some(Value::Bool(op.apply(a_val, b_val)))
+            }
+            NodeKind::And => {
+                let a_source = self.find_source_for_input(node_id, 0)?;
+                let a_val = self
+                    .evaluate_output(a_source.node_id, visiting, variables, call_cache)?
+                    .as_bool()?;
+                if !a_val {
+                    // short-circuit: A is false, B is not evaluated
+                    Some(Value::Bool(false))
+                } else {
+                    let b_source = self.find_source_for_input(node_id, 1)?;
+                    let b_val = self
+                        .evaluate_output(b_source.node_id, visiting, variables, call_cache)?
+                        .as_bool()?;
+                    Some(Value::Bool(b_val))
+                }
+            }
+            NodeKind::Or => {
+                let a_source = self.find_source_for_input(node_id, 0)?;
+                let a_val = self
+                    .evaluate_output(a_source.node_id, visiting, variables, call_cache)?
+                    .as_bool()?;
+                if a_val {
+                    // short-circuit: A is true, B is not evaluated
+                    Some(Value::Bool(true))
+                } else {
+                    let b_source = self.find_source_for_input(node_id, 1)?;
+                    let b_val = self
+                        .evaluate_output(b_source.node_id, visiting, variables, call_cache)?
+                        .as_bool()?;
+                    Some(Value::Bool(b_val))
+                }
+            }
+            NodeKind::Not => {
+                let a_source = self.find_source_for_input(node_id, 0)?;
+                let a_val = self
+                    .evaluate_output(a_source.node_id, visiting, variables, call_cache)?
+                    .as_bool()?;
+                Some(Value::Bool(!a_val))
             }
             NodeKind::Branch => {
                 let cond_source = self.find_source_for_input(node_id, 0)?;
                 let then_source = self.find_source_for_input(node_id, 1)?;
                 let else_source = self.find_source_for_input(node_id, 2)?;
-                let cond_val = self.evaluate_output(cond_source.node_id, visiting, variables, call_cache)?.as_bool()?;
+                let cond_val = self
+                    .evaluate_output(cond_source.node_id, visiting, variables, call_cache)?
+                    .as_bool()?;
                 if cond_val {
-                    let then_val = self.evaluate_output(then_source.node_id, visiting, variables, call_cache)?.as_number()?;
+                    let then_val = self
+                        .evaluate_output(then_source.node_id, visiting, variables, call_cache)?
+                        .as_number()?;
                     Some(Value::Number(then_val))
                 } else {
-                    let else_val = self.evaluate_output(else_source.node_id, visiting, variables, call_cache)?.as_number()?;
+                    let else_val = self
+                        .evaluate_output(else_source.node_id, visiting, variables, call_cache)?
+                        .as_number()?;
                     Some(Value::Number(else_val))
                 }
             }
@@ -846,7 +1402,10 @@ impl BlockoApp {
                 return;
             }
             if *steps >= MAX_EXEC_STEPS {
-                console.push("... execution stopped: step limit reached (possible infinite loop) ...".to_string());
+                console.push(
+                    "... execution stopped: step limit reached (possible infinite loop) ..."
+                        .to_string(),
+                );
                 return;
             }
             *steps += 1;
@@ -861,7 +1420,9 @@ impl BlockoApp {
                     let mut visiting = Vec::new();
                     let value = self
                         .find_source_for_input(id, 0)
-                        .and_then(|src| self.evaluate_output(src.node_id, &mut visiting, variables, call_cache))
+                        .and_then(|src| {
+                            self.evaluate_output(src.node_id, &mut visiting, variables, call_cache)
+                        })
                         .and_then(|v| v.as_number())
                         .unwrap_or(0.0);
                     variables.insert(name.clone(), value);
@@ -870,9 +1431,16 @@ impl BlockoApp {
                 NodeKind::Print => {
                     let mut visiting = Vec::new();
                     match self.find_source_for_input(id, 0) {
-                        Some(src) => match self.evaluate_output(src.node_id, &mut visiting, variables, call_cache) {
+                        Some(src) => match self.evaluate_output(
+                            src.node_id,
+                            &mut visiting,
+                            variables,
+                            call_cache,
+                        ) {
                             Some(value) => console.push(format!("Print[{}] -> {}", id, value)),
-                            None => console.push(format!("Print[{}] -> <could not evaluate input>", id)),
+                            None => {
+                                console.push(format!("Print[{}] -> <could not evaluate input>", id))
+                            }
                         },
                         None => console.push(format!("Print[{}] -> <no input connected>", id)),
                     }
@@ -887,14 +1455,29 @@ impl BlockoApp {
                         let mut visiting = Vec::new();
                         let cond = self
                             .find_source_for_input(id, 0)
-                            .and_then(|src| self.evaluate_output(src.node_id, &mut visiting, variables, call_cache))
+                            .and_then(|src| {
+                                self.evaluate_output(
+                                    src.node_id,
+                                    &mut visiting,
+                                    variables,
+                                    call_cache,
+                                )
+                            })
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
                         if !cond {
                             break;
                         }
                         if let Some(body_start) = self.find_exec_target(id, 0) {
-                            self.exec_statement(body_start, variables, console, steps, functions, call_cache, return_slot);
+                            self.exec_statement(
+                                body_start,
+                                variables,
+                                console,
+                                steps,
+                                functions,
+                                call_cache,
+                                return_slot,
+                            );
                             if return_slot.is_some() {
                                 return;
                             }
@@ -907,13 +1490,27 @@ impl BlockoApp {
                     let mut visiting_a = Vec::new();
                     let a0 = self
                         .find_source_for_input(id, 0)
-                        .and_then(|src| self.evaluate_output(src.node_id, &mut visiting_a, variables, call_cache))
+                        .and_then(|src| {
+                            self.evaluate_output(
+                                src.node_id,
+                                &mut visiting_a,
+                                variables,
+                                call_cache,
+                            )
+                        })
                         .and_then(|v| v.as_number())
                         .unwrap_or(0.0);
                     let mut visiting_b = Vec::new();
                     let a1 = self
                         .find_source_for_input(id, 1)
-                        .and_then(|src| self.evaluate_output(src.node_id, &mut visiting_b, variables, call_cache))
+                        .and_then(|src| {
+                            self.evaluate_output(
+                                src.node_id,
+                                &mut visiting_b,
+                                variables,
+                                call_cache,
+                            )
+                        })
                         .and_then(|v| v.as_number())
                         .unwrap_or(0.0);
 
@@ -926,7 +1523,15 @@ impl BlockoApp {
                         }
                         let mut inner_return: Option<f32> = None;
                         if let Some(body_start) = body_start_opt {
-                            self.exec_statement(*body_start, variables, console, steps, functions, call_cache, &mut inner_return);
+                            self.exec_statement(
+                                *body_start,
+                                variables,
+                                console,
+                                steps,
+                                functions,
+                                call_cache,
+                                &mut inner_return,
+                            );
                         }
                         call_cache.insert(id, inner_return.unwrap_or(0.0));
                     } else {
@@ -939,7 +1544,9 @@ impl BlockoApp {
                     let mut visiting = Vec::new();
                     let value = self
                         .find_source_for_input(id, 0)
-                        .and_then(|src| self.evaluate_output(src.node_id, &mut visiting, variables, call_cache))
+                        .and_then(|src| {
+                            self.evaluate_output(src.node_id, &mut visiting, variables, call_cache)
+                        })
                         .and_then(|v| v.as_number())
                         .unwrap_or(0.0);
                     *return_slot = Some(value);
@@ -971,9 +1578,16 @@ impl BlockoApp {
         for print_id in print_ids {
             let mut visiting = Vec::new();
             match self.find_source_for_input(print_id, 0) {
-                Some(source) => match self.evaluate_output(source.node_id, &mut visiting, &variables, &call_cache) {
+                Some(source) => match self.evaluate_output(
+                    source.node_id,
+                    &mut visiting,
+                    &variables,
+                    &call_cache,
+                ) {
                     Some(value) => console.push(format!("Print[{}] -> {}", print_id, value)),
-                    None => console.push(format!("Print[{}] -> <could not evaluate input>", print_id)),
+                    None => {
+                        console.push(format!("Print[{}] -> <could not evaluate input>", print_id))
+                    }
                 },
                 None => console.push(format!("Print[{}] -> <no input connected>", print_id)),
             }
@@ -1008,7 +1622,15 @@ impl BlockoApp {
             let mut call_cache: HashMap<NodeId, f32> = HashMap::new();
             let mut return_slot: Option<f32> = None;
             if let Some(first) = self.find_exec_target(start_id, 0) {
-                self.exec_statement(first, &mut variables, &mut console, &mut steps, &functions, &mut call_cache, &mut return_slot);
+                self.exec_statement(
+                    first,
+                    &mut variables,
+                    &mut console,
+                    &mut steps,
+                    &functions,
+                    &mut call_cache,
+                    &mut return_slot,
+                );
             } else {
                 console.push("Start node has no connected statements.".to_string());
             }
@@ -1055,15 +1677,14 @@ impl BlockoApp {
                 var_names.insert(node_id, (var_name.clone(), IRType::Number));
                 Some((var_name.clone(), IRType::Number))
             }
-            NodeKind::Add
-            | NodeKind::Sub
-            | NodeKind::Mul
-            | NodeKind::Div => {
+            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div => {
                 let a_source = self.find_source_for_input(node_id, 0)?;
                 let b_source = self.find_source_for_input(node_id, 1)?;
-                let (a_name, _) = self.build_expr_ir(a_source.node_id, var_names, out, counters, visiting)?;
-                let (b_name, _) = self.build_expr_ir(b_source.node_id, var_names, out, counters, visiting)?;
-                
+                let (a_name, _) =
+                    self.build_expr_ir(a_source.node_id, var_names, out, counters, visiting)?;
+                let (b_name, _) =
+                    self.build_expr_ir(b_source.node_id, var_names, out, counters, visiting)?;
+
                 let (prefix, op, count_ref) = match node.kind {
                     NodeKind::Add => ("add", IROp::Add(a_name, b_name), &mut counters.1),
                     NodeKind::Sub => ("sub", IROp::Sub(a_name, b_name), &mut counters.2),
@@ -1071,10 +1692,10 @@ impl BlockoApp {
                     NodeKind::Div => ("div", IROp::Div(a_name, b_name), &mut counters.4),
                     _ => unreachable!(),
                 };
-                
+
                 let name = format!("{}_{}", prefix, *count_ref);
                 *count_ref += 1;
-                
+
                 out.push(IRStmt::Compute(IRStatement {
                     var_name: name.clone(),
                     ir_type: IRType::Number,
@@ -1086,8 +1707,10 @@ impl BlockoApp {
             NodeKind::Compare(op) => {
                 let a_source = self.find_source_for_input(node_id, 0)?;
                 let b_source = self.find_source_for_input(node_id, 1)?;
-                let (a_name, _) = self.build_expr_ir(a_source.node_id, var_names, out, counters, visiting)?;
-                let (b_name, _) = self.build_expr_ir(b_source.node_id, var_names, out, counters, visiting)?;
+                let (a_name, _) =
+                    self.build_expr_ir(a_source.node_id, var_names, out, counters, visiting)?;
+                let (b_name, _) =
+                    self.build_expr_ir(b_source.node_id, var_names, out, counters, visiting)?;
                 let name = format!("cmp_{}", counters.2);
                 counters.2 += 1;
                 out.push(IRStmt::Compute(IRStatement {
@@ -1098,13 +1721,54 @@ impl BlockoApp {
                 var_names.insert(node_id, (name.clone(), IRType::Bool));
                 Some((name, IRType::Bool))
             }
+            NodeKind::And | NodeKind::Or => {
+                let a_source = self.find_source_for_input(node_id, 0)?;
+                let b_source = self.find_source_for_input(node_id, 1)?;
+                let (a_name, _) =
+                    self.build_expr_ir(a_source.node_id, var_names, out, counters, visiting)?;
+                let (b_name, _) =
+                    self.build_expr_ir(b_source.node_id, var_names, out, counters, visiting)?;
+
+                let (prefix, op) = match node.kind {
+                    NodeKind::And => ("and", IROp::And(a_name, b_name)),
+                    NodeKind::Or => ("or", IROp::Or(a_name, b_name)),
+                    _ => unreachable!(),
+                };
+
+                let name = format!("{}_{}", prefix, counters.5);
+                counters.5 += 1;
+                out.push(IRStmt::Compute(IRStatement {
+                    var_name: name.clone(),
+                    ir_type: IRType::Bool,
+                    op,
+                }));
+                var_names.insert(node_id, (name.clone(), IRType::Bool));
+                Some((name, IRType::Bool))
+            }
+            NodeKind::Not => {
+                let a_source = self.find_source_for_input(node_id, 0)?;
+                let (a_name, _) =
+                    self.build_expr_ir(a_source.node_id, var_names, out, counters, visiting)?;
+                let name = format!("not_{}", counters.5);
+                counters.5 += 1;
+                out.push(IRStmt::Compute(IRStatement {
+                    var_name: name.clone(),
+                    ir_type: IRType::Bool,
+                    op: IROp::Not(a_name),
+                }));
+                var_names.insert(node_id, (name.clone(), IRType::Bool));
+                Some((name, IRType::Bool))
+            }
             NodeKind::Branch => {
                 let cond_source = self.find_source_for_input(node_id, 0)?;
                 let then_source = self.find_source_for_input(node_id, 1)?;
                 let else_source = self.find_source_for_input(node_id, 2)?;
-                let (cond_name, _) = self.build_expr_ir(cond_source.node_id, var_names, out, counters, visiting)?;
-                let (then_name, _) = self.build_expr_ir(then_source.node_id, var_names, out, counters, visiting)?;
-                let (else_name, _) = self.build_expr_ir(else_source.node_id, var_names, out, counters, visiting)?;
+                let (cond_name, _) =
+                    self.build_expr_ir(cond_source.node_id, var_names, out, counters, visiting)?;
+                let (then_name, _) =
+                    self.build_expr_ir(then_source.node_id, var_names, out, counters, visiting)?;
+                let (else_name, _) =
+                    self.build_expr_ir(else_source.node_id, var_names, out, counters, visiting)?;
                 let name = format!("branch_{}", counters.3);
                 counters.3 += 1;
                 out.push(IRStmt::Compute(IRStatement {
@@ -1135,7 +1799,9 @@ impl BlockoApp {
         while let Some(id) = current {
             safety += 1;
             if safety > 5000 {
-                out.push(IRStmt::Comment("execution chain too long or cyclic, stopped".to_string()));
+                out.push(IRStmt::Comment(
+                    "execution chain too long or cyclic, stopped".to_string(),
+                ));
                 break;
             }
             let node = match self.nodes.get(&id) {
@@ -1148,22 +1814,43 @@ impl BlockoApp {
                     let mut visiting = Vec::new();
                     let value_var = match self.find_source_for_input(id, 0) {
                         Some(src) => self
-                            .build_expr_ir(src.node_id, &mut var_names, &mut out, counters, &mut visiting)
+                            .build_expr_ir(
+                                src.node_id,
+                                &mut var_names,
+                                &mut out,
+                                counters,
+                                &mut visiting,
+                            )
                             .map(|(n, _)| n)
                             .unwrap_or_else(|| "0.0".to_string()),
                         None => "0.0".to_string(),
                     };
-                    out.push(IRStmt::SetVar { name: name.clone(), value_var });
+                    out.push(IRStmt::SetVar {
+                        name: name.clone(),
+                        value_var,
+                    });
                     current = self.find_exec_target(id, 0);
                 }
                 NodeKind::Print => {
                     let mut visiting = Vec::new();
                     match self.find_source_for_input(id, 0) {
-                        Some(src) => match self.build_expr_ir(src.node_id, &mut var_names, &mut out, counters, &mut visiting) {
+                        Some(src) => match self.build_expr_ir(
+                            src.node_id,
+                            &mut var_names,
+                            &mut out,
+                            counters,
+                            &mut visiting,
+                        ) {
                             Some((v, _)) => out.push(IRStmt::Print { value_var: v }),
-                            None => out.push(IRStmt::Comment(format!("Print node {} has a cycle or missing input", id))),
+                            None => out.push(IRStmt::Comment(format!(
+                                "Print node {} has a cycle or missing input",
+                                id
+                            ))),
                         },
-                        None => out.push(IRStmt::Comment(format!("Print node {} has no input connected", id))),
+                        None => out.push(IRStmt::Comment(format!(
+                            "Print node {} has no input connected",
+                            id
+                        ))),
                     }
                     current = self.find_exec_target(id, 0);
                 }
@@ -1173,27 +1860,53 @@ impl BlockoApp {
                     let mut visiting = Vec::new();
                     let cond_var = match self.find_source_for_input(id, 0) {
                         Some(src) => self
-                            .build_expr_ir(src.node_id, &mut cond_names, &mut cond_lines, counters, &mut visiting)
+                            .build_expr_ir(
+                                src.node_id,
+                                &mut cond_names,
+                                &mut cond_lines,
+                                counters,
+                                &mut visiting,
+                            )
                             .map(|(n, _)| n)
                             .unwrap_or_else(|| "false".to_string()),
                         None => "false".to_string(),
                     };
                     let body_start = self.find_exec_target(id, 0);
                     let body = self.build_stmt_chain(body_start, counters);
-                    out.push(IRStmt::While { cond_lines, cond_var, body });
+                    out.push(IRStmt::While {
+                        cond_lines,
+                        cond_var,
+                        body,
+                    });
                     current = self.find_exec_target(id, 1);
                 }
                 NodeKind::FunctionCall { name } => {
                     let mut visiting_a = Vec::new();
                     let arg0 = self
                         .find_source_for_input(id, 0)
-                        .and_then(|src| self.build_expr_ir(src.node_id, &mut var_names, &mut out, counters, &mut visiting_a))
+                        .and_then(|src| {
+                            self.build_expr_ir(
+                                src.node_id,
+                                &mut var_names,
+                                &mut out,
+                                counters,
+                                &mut visiting_a,
+                            )
+                        })
                         .map(|(n, _)| n)
                         .unwrap_or_else(|| "0.0".to_string());
                     let mut visiting_b = Vec::new();
                     let arg1 = self
                         .find_source_for_input(id, 1)
-                        .and_then(|src| self.build_expr_ir(src.node_id, &mut var_names, &mut out, counters, &mut visiting_b))
+                        .and_then(|src| {
+                            self.build_expr_ir(
+                                src.node_id,
+                                &mut var_names,
+                                &mut out,
+                                counters,
+                                &mut visiting_b,
+                            )
+                        })
                         .map(|(n, _)| n)
                         .unwrap_or_else(|| "0.0".to_string());
                     let var_name = format!("call_{}", counters.4);
@@ -1210,7 +1923,13 @@ impl BlockoApp {
                     let mut visiting = Vec::new();
                     let value_var = match self.find_source_for_input(id, 0) {
                         Some(src) => self
-                            .build_expr_ir(src.node_id, &mut var_names, &mut out, counters, &mut visiting)
+                            .build_expr_ir(
+                                src.node_id,
+                                &mut var_names,
+                                &mut out,
+                                counters,
+                                &mut visiting,
+                            )
                             .map(|(n, _)| n)
                             .unwrap_or_else(|| "0.0".to_string()),
                         None => "0.0".to_string(),
@@ -1228,7 +1947,7 @@ impl BlockoApp {
     }
 
     fn build_full_ir(&self) -> (Vec<IRFunction>, Vec<IRStmt>) {
-        let mut counters: Counters = (0, 0, 0, 0, 0);
+        let mut counters: Counters = (0, 0, 0, 0, 0, 0);
         let mut functions_ir: Vec<IRFunction> = Vec::new();
 
         let mut func_ids: Vec<NodeId> = self
@@ -1249,7 +1968,11 @@ impl BlockoApp {
                         .collect();
                     let body_start = self.find_exec_target(id, 0);
                     let body = self.build_stmt_chain(body_start, &mut counters);
-                    functions_ir.push(IRFunction { name: name.clone(), params: plist, body });
+                    functions_ir.push(IRFunction {
+                        name: name.clone(),
+                        params: plist,
+                        body,
+                    });
                 }
             }
         }
@@ -1268,11 +1991,23 @@ impl BlockoApp {
                     if matches!(n.kind, NodeKind::Print) {
                         let mut visiting = Vec::new();
                         match self.find_source_for_input(id, 0) {
-                            Some(src) => match self.build_expr_ir(src.node_id, &mut var_names, &mut out, &mut counters, &mut visiting) {
+                            Some(src) => match self.build_expr_ir(
+                                src.node_id,
+                                &mut var_names,
+                                &mut out,
+                                &mut counters,
+                                &mut visiting,
+                            ) {
                                 Some((v, _)) => out.push(IRStmt::Print { value_var: v }),
-                                None => out.push(IRStmt::Comment(format!("Print node {} has a cycle or missing input", id))),
+                                None => out.push(IRStmt::Comment(format!(
+                                    "Print node {} has a cycle or missing input",
+                                    id
+                                ))),
                             },
-                            None => out.push(IRStmt::Comment(format!("Print node {} has no input connected", id))),
+                            None => out.push(IRStmt::Comment(format!(
+                                "Print node {} has no input connected",
+                                id
+                            ))),
                         }
                     }
                 }
@@ -1298,7 +2033,13 @@ impl BlockoApp {
         let filename = format!("blocko_export.{}", self.current_language.file_extension());
 
         match std::fs::write(&filename, code) {
-            Ok(_) => self.status_message = format!("Exported {} source to {}", self.current_language.label(), filename),
+            Ok(_) => {
+                self.status_message = format!(
+                    "Exported {} source to {}",
+                    self.current_language.label(),
+                    filename
+                )
+            }
             Err(e) => self.status_message = format!("Export failed: {}", e),
         }
     }
@@ -1336,7 +2077,8 @@ impl BlockoApp {
         let contents = match std::fs::read_to_string(PROJECT_FILE) {
             Ok(text) => text,
             Err(e) => {
-                self.status_message = format!("Load failed: could not read {} ({})", PROJECT_FILE, e);
+                self.status_message =
+                    format!("Load failed: could not read {} ({})", PROJECT_FILE, e);
                 return;
             }
         };
@@ -1378,16 +2120,12 @@ impl BlockoApp {
     }
 }
 
-fn pin_color(kind: PinKind, data_type: PinDataType) -> Color32 {
-    match (kind, data_type) {
-        (PinKind::Input, PinDataType::Number) => Color32::from_rgb(220, 180, 90),
-        (PinKind::Output, PinDataType::Number) => Color32::from_rgb(120, 220, 150),
-        (PinKind::Input, PinDataType::Bool) => Color32::from_rgb(220, 120, 200),
-        (PinKind::Output, PinDataType::Bool) => Color32::from_rgb(180, 130, 230),
-        (PinKind::Input, PinDataType::Any) => Color32::from_rgb(200, 200, 200),
-        (PinKind::Output, PinDataType::Any) => Color32::from_rgb(200, 200, 200),
-        (PinKind::Input, PinDataType::Exec) => Color32::from_rgb(235, 235, 235),
-        (PinKind::Output, PinDataType::Exec) => Color32::from_rgb(255, 255, 255),
+fn pin_color(data_type: PinDataType) -> Color32 {
+    match data_type {
+        PinDataType::Number => theme::PIN_NUMBER,
+        PinDataType::Bool => theme::PIN_BOOL,
+        PinDataType::Any => theme::PIN_ANY,
+        PinDataType::Exec => theme::PIN_EXEC,
     }
 }
 
@@ -1450,30 +2188,64 @@ impl eframe::App for BlockoApp {
 
         egui::TopBottomPanel::bottom("console_panel")
             .resizable(true)
-            .default_height(160.0)
-            .height_range(80.0..=400.0)
+            .default_height(170.0)
+            .height_range(90.0..=420.0)
             .show(ctx, |ui| {
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.heading("Console");
-                    if ui.button("Clear").clicked() {
+                    ui.label(
+                        egui::RichText::new("Console")
+                            .size(15.0)
+                            .strong()
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                    if ui.small_button("Clear").clicked() {
                         self.console_lines.clear();
                     }
                 });
-                ui.separator();
-                egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                    for line in &self.console_lines {
-                        ui.monospace(line);
-                    }
-                });
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.console_lines {
+                            let lower = line.to_lowercase();
+                            let color = if lower.contains("error")
+                                || lower.contains("failed")
+                                || lower.contains("could not")
+                            {
+                                theme::CONSOLE_ERR
+                            } else if lower.contains("executed")
+                                || lower.contains("no errors")
+                                || lower.contains("saved")
+                                || lower.contains("loaded")
+                            {
+                                theme::CONSOLE_OK
+                            } else {
+                                theme::TEXT_MUTED
+                            };
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .monospace()
+                                    .size(12.5)
+                                    .color(color),
+                            );
+                        }
+                    });
             });
 
         egui::SidePanel::right("code_preview_panel")
             .resizable(true)
-            .default_width(420.0)
-            .width_range(260.0..=700.0)
+            .default_width(430.0)
+            .width_range(280.0..=750.0)
             .show(ctx, |ui| {
-                ui.heading("Code Preview");
-                ui.separator();
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Code Preview")
+                        .size(18.0)
+                        .strong()
+                        .color(theme::TEXT_PRIMARY),
+                );
+                ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
                     for lang in [
@@ -1482,7 +2254,10 @@ impl eframe::App for BlockoApp {
                         TargetLanguage::JavaScript,
                         TargetLanguage::Cpp,
                     ] {
-                        if ui.selectable_label(self.current_language == lang, lang.label()).clicked() {
+                        if ui
+                            .selectable_label(self.current_language == lang, lang.label())
+                            .clicked()
+                        {
                             self.current_language = lang;
                         }
                     }
@@ -1490,124 +2265,118 @@ impl eframe::App for BlockoApp {
 
                 ui.add_space(6.0);
                 if ui
-                    .add(egui::Button::new("Export Source").min_size(egui::vec2(ui.available_width(), 26.0)))
+                    .add(
+                        egui::Button::new("Export Source")
+                            .min_size(egui::vec2(ui.available_width(), 26.0)),
+                    )
                     .clicked()
                 {
                     self.export_code();
                 }
 
-                ui.add_space(6.0);
-                ui.separator();
+                ui.add_space(8.0);
 
                 let code = self.generate_code_for(self.current_language);
-                egui::ScrollArea::both().show(ui, |ui| {
-                    let mut code_display = code.clone();
-                    ui.add(
-                        egui::TextEdit::multiline(&mut code_display)
-                            .font(egui::TextStyle::Monospace)
-                            .code_editor()
-                            .desired_width(f32::INFINITY)
-                            .interactive(false),
-                    );
-                });
+                code_preview_view(ui, &code, self.current_language);
             });
 
         egui::SidePanel::left("toolbox_panel")
             .resizable(true)
             .default_width(240.0)
-            .width_range(150.0..=420.0)
+            .width_range(180.0..=420.0)
             .show(ctx, |ui| {
-                ui.heading("Toolbox");
-                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Toolbox")
+                                .size(18.0)
+                                .strong()
+                                .color(theme::TEXT_PRIMARY),
+                        );
 
-                if ui.add(egui::Button::new("Add Number").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Number(0.0));
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Math (Add)").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Add);
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Math (Subtract)").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Sub);
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Math (Multiply)").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Mul);
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Math (Divide)").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Div);
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Print").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Print);
-                }
+                        section_header(ui, "Numbers");
+                        if toolbox_button(ui, theme::ACCENT_NUMBERS, "Add Number") {
+                            self.add_node(NodeKind::Number(0.0));
+                        }
+                        if toolbox_button(ui, theme::ACCENT_NUMBERS, "Add Math (Add)") {
+                            self.add_node(NodeKind::Add);
+                        }
+                        if toolbox_button(ui, theme::ACCENT_NUMBERS, "Add Math (Subtract)") {
+                            self.add_node(NodeKind::Sub);
+                        }
+                        if toolbox_button(ui, theme::ACCENT_NUMBERS, "Add Math (Multiply)") {
+                            self.add_node(NodeKind::Mul);
+                        }
+                        if toolbox_button(ui, theme::ACCENT_NUMBERS, "Add Math (Divide)") {
+                            self.add_node(NodeKind::Div);
+                        }
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.label("Logic:");
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Compare").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Compare(CompareOp::GreaterThan));
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add If / Else").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Branch);
-                }
+                        section_header(ui, "Logic");
+                        if toolbox_button(ui, theme::ACCENT_LOGIC, "Add Compare") {
+                            self.add_node(NodeKind::Compare(CompareOp::GreaterThan));
+                        }
+                        if toolbox_button(ui, theme::ACCENT_LOGIC, "Add If / Else") {
+                            self.add_node(NodeKind::Branch);
+                        }
+                        if toolbox_button(ui, theme::ACCENT_LOGIC, "Add Logic (AND)") {
+                            self.add_node(NodeKind::And);
+                        }
+                        if toolbox_button(ui, theme::ACCENT_LOGIC, "Add Logic (OR)") {
+                            self.add_node(NodeKind::Or);
+                        }
+                        if toolbox_button(ui, theme::ACCENT_LOGIC, "Add Logic (NOT)") {
+                            self.add_node(NodeKind::Not);
+                        }
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.label("Flow:");
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Start").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Start);
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Set Variable").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::SetVariable("x".to_string()));
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Get Variable").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::GetVariable("x".to_string()));
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add While Loop").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::WhileLoop);
-                }
+                        section_header(ui, "Flow");
+                        if toolbox_button(ui, theme::ACCENT_FLOW, "Add Start") {
+                            self.add_node(NodeKind::Start);
+                        }
+                        if toolbox_button(ui, theme::ACCENT_FLOW, "Add Set Variable") {
+                            self.add_node(NodeKind::SetVariable("x".to_string()));
+                        }
+                        if toolbox_button(ui, theme::ACCENT_FLOW, "Add Get Variable") {
+                            self.add_node(NodeKind::GetVariable("x".to_string()));
+                        }
+                        if toolbox_button(ui, theme::ACCENT_FLOW, "Add While Loop") {
+                            self.add_node(NodeKind::WhileLoop);
+                        }
+                        if toolbox_button(ui, theme::ACCENT_FLOW, "Add Print") {
+                            self.add_node(NodeKind::Print);
+                        }
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.label("Functions:");
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Function Def").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::FunctionDef {
-                        name: "my_func".to_string(),
-                        params: "a, b".to_string(),
+                        section_header(ui, "Functions");
+                        if toolbox_button(ui, theme::ACCENT_FUNCTIONS, "Add Function Def") {
+                            self.add_node(NodeKind::FunctionDef {
+                                name: "my_func".to_string(),
+                                params: "a, b".to_string(),
+                            });
+                        }
+                        if toolbox_button(ui, theme::ACCENT_FUNCTIONS, "Add Call Function") {
+                            self.add_node(NodeKind::FunctionCall {
+                                name: "my_func".to_string(),
+                            });
+                        }
+                        if toolbox_button(ui, theme::ACCENT_FUNCTIONS, "Add Return") {
+                            self.add_node(NodeKind::Return);
+                        }
+
+                        section_header(ui, "Project");
+                        if toolbox_button(ui, theme::ACCENT_PROJECT, "Save Project") {
+                            self.save_project();
+                        }
+                        if toolbox_button(ui, theme::ACCENT_PROJECT, "Load Project") {
+                            self.load_project();
+                        }
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(format!("File: {}", PROJECT_FILE))
+                                .size(10.5)
+                                .color(theme::TEXT_MUTED),
+                        );
                     });
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Call Function").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::FunctionCall { name: "my_func".to_string() });
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Add Return").min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                    self.add_node(NodeKind::Return);
-                }
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.label("Project:");
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Save Project").min_size(egui::vec2(ui.available_width(), 28.0))).clicked() {
-                    self.save_project();
-                }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new("Load Project").min_size(egui::vec2(ui.available_width(), 28.0))).clicked() {
-                    self.load_project();
-                }
-                ui.add_space(4.0);
-                ui.small(format!("File: {}", PROJECT_FILE));
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1632,11 +2401,14 @@ impl eframe::App for BlockoApp {
             ui.interact(canvas_rect, ui.id().with("canvas_bg"), Sense::click());
 
             for conn in &self.connections {
-                if let (Some(&from_pos), Some(&to_pos)) = (self.pin_positions.get(&conn.from), self.pin_positions.get(&conn.to)) {
+                if let (Some(&from_pos), Some(&to_pos)) = (
+                    self.pin_positions.get(&conn.from),
+                    self.pin_positions.get(&conn.to),
+                ) {
                     let color = if conn.from.is_exec {
-                        Color32::from_rgb(255, 255, 255)
+                        theme::PIN_EXEC
                     } else {
-                        Color32::from_rgb(120, 180, 255)
+                        theme::PIN_NUMBER
                     };
                     draw_wire(ui.painter(), from_pos, to_pos, color);
                 }
@@ -1655,19 +2427,35 @@ impl eframe::App for BlockoApp {
                 let widget_extra = node.kind.widget_extra_height();
                 let screen_pos = origin + node.pos.to_vec2();
                 let node_rect = Rect::from_min_size(screen_pos, Vec2::new(NODE_WIDTH, height));
-                let title_rect = Rect::from_min_size(screen_pos, Vec2::new(NODE_WIDTH, TITLE_HEIGHT));
+                let title_rect =
+                    Rect::from_min_size(screen_pos, Vec2::new(NODE_WIDTH, TITLE_HEIGHT));
 
                 let painter = ui.painter();
-                painter.rect_filled(node_rect, 6.0, Color32::from_rgb(45, 45, 52));
-                painter.rect_filled(title_rect, 6.0, Color32::from_rgb(60, 60, 90));
+                painter.rect_filled(node_rect, 8.0, theme::BG_NODE);
+                painter.rect_filled(title_rect, 8.0, theme::BG_NODE_HEADER);
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        Pos2::new(node_rect.left(), node_rect.top() + TITLE_HEIGHT - 8.0),
+                        Vec2::new(NODE_WIDTH, 8.0),
+                    ),
+                    0.0,
+                    theme::BG_NODE_HEADER,
+                );
                 painter.text(
-                    title_rect.center(),
-                    Align2::CENTER_CENTER,
+                    Pos2::new(node_rect.left() + 12.0, title_rect.center().y),
+                    Align2::LEFT_CENTER,
                     node.kind.title(),
                     FontId::proportional(14.0),
-                    Color32::WHITE,
+                    theme::TEXT_PRIMARY,
                 );
-                painter.rect_stroke(node_rect, 6.0, Stroke::new(1.0, Color32::from_gray(80)));
+                painter.line_segment(
+                    [
+                        Pos2::new(node_rect.left(), node_rect.top() + TITLE_HEIGHT),
+                        Pos2::new(node_rect.right(), node_rect.top() + TITLE_HEIGHT),
+                    ],
+                    Stroke::new(1.0, theme::BORDER_SOFT),
+                );
+                painter.rect_stroke(node_rect, 8.0, Stroke::new(1.2, theme::BORDER));
 
                 let drag_id = ui.id().with(("node_drag", node_id));
                 let drag_response = ui.interact(title_rect, drag_id, Sense::click_and_drag());
@@ -1679,15 +2467,28 @@ impl eframe::App for BlockoApp {
                 }
 
                 if let NodeKind::Compare(op) = &mut node.kind {
+                    let row_y = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 0.5;
+                    let painter = ui.painter();
+                    painter.text(
+                        Pos2::new(node_rect.left() + 12.0, row_y),
+                        Align2::LEFT_CENTER,
+                        "Op",
+                        FontId::proportional(12.0),
+                        theme::TEXT_MUTED,
+                    );
                     let combo_rect = Rect::from_min_size(
-                        screen_pos + Vec2::new(8.0, TITLE_HEIGHT + 2.0),
-                        Vec2::new(NODE_WIDTH - 16.0, ROW_HEIGHT - 4.0),
+                        Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
+                        Vec2::new(NODE_WIDTH - 70.0, 18.0),
                     );
                     ui.allocate_ui_at_rect(combo_rect, |ui| {
                         egui::ComboBox::from_id_source(("compare_op", node_id))
                             .selected_text(op.label())
                             .show_ui(ui, |ui| {
-                                for candidate in [CompareOp::GreaterThan, CompareOp::LessThan, CompareOp::EqualTo] {
+                                for candidate in [
+                                    CompareOp::GreaterThan,
+                                    CompareOp::LessThan,
+                                    CompareOp::EqualTo,
+                                ] {
                                     ui.selectable_value(op, candidate, candidate.label());
                                 }
                             });
@@ -1697,38 +2498,91 @@ impl eframe::App for BlockoApp {
                 match &mut node.kind {
                     NodeKind::Number(value) => {
                         let row_y = screen_pos.y + TITLE_HEIGHT + BODY_PADDING + ROW_HEIGHT * 0.5;
-                        let value_rect = Rect::from_center_size(
-                            Pos2::new(node_rect.left() + NODE_WIDTH * 0.42, row_y),
-                            Vec2::new(60.0, 18.0),
+                        let painter = ui.painter();
+                        painter.text(
+                            Pos2::new(node_rect.left() + 12.0, row_y),
+                            Align2::LEFT_CENTER,
+                            "Value",
+                            FontId::proportional(12.0),
+                            theme::TEXT_MUTED,
+                        );
+                        let value_rect = Rect::from_min_size(
+                            Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
+                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
                         );
                         ui.put(value_rect, egui::DragValue::new(value).speed(0.1));
                     }
                     NodeKind::SetVariable(name) | NodeKind::GetVariable(name) => {
+                        let row_y = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 0.5;
+                        let painter = ui.painter();
+                        painter.text(
+                            Pos2::new(node_rect.left() + 12.0, row_y),
+                            Align2::LEFT_CENTER,
+                            "Name",
+                            FontId::proportional(12.0),
+                            theme::TEXT_MUTED,
+                        );
                         let box_rect = Rect::from_min_size(
-                            screen_pos + Vec2::new(8.0, TITLE_HEIGHT + 2.0),
-                            Vec2::new(NODE_WIDTH - 16.0, ROW_HEIGHT - 4.0),
+                            Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
+                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
                         );
                         ui.put(box_rect, egui::TextEdit::singleline(name).hint_text("name"));
                     }
                     NodeKind::FunctionDef { name, params } => {
+                        let row_y1 = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 0.5;
+                        let painter = ui.painter();
+                        painter.text(
+                            Pos2::new(node_rect.left() + 12.0, row_y1),
+                            Align2::LEFT_CENTER,
+                            "Name",
+                            FontId::proportional(12.0),
+                            theme::TEXT_MUTED,
+                        );
                         let name_rect = Rect::from_min_size(
-                            screen_pos + Vec2::new(8.0, TITLE_HEIGHT + 2.0),
-                            Vec2::new(NODE_WIDTH - 16.0, ROW_HEIGHT - 4.0),
+                            Pos2::new(node_rect.left() + 58.0, row_y1 - 9.0),
+                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
                         );
-                        ui.put(name_rect, egui::TextEdit::singleline(name).hint_text("function name"));
+                        ui.put(
+                            name_rect,
+                            egui::TextEdit::singleline(name).hint_text("function name"),
+                        );
 
-                        let params_rect = Rect::from_min_size(
-                            screen_pos + Vec2::new(8.0, TITLE_HEIGHT + 2.0 + ROW_HEIGHT),
-                            Vec2::new(NODE_WIDTH - 16.0, ROW_HEIGHT - 4.0),
+                        let row_y2 = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 1.5;
+                        let painter = ui.painter();
+                        painter.text(
+                            Pos2::new(node_rect.left() + 12.0, row_y2),
+                            Align2::LEFT_CENTER,
+                            "Params",
+                            FontId::proportional(12.0),
+                            theme::TEXT_MUTED,
                         );
-                        ui.put(params_rect, egui::TextEdit::singleline(params).hint_text("param1, param2"));
+                        let params_rect = Rect::from_min_size(
+                            Pos2::new(node_rect.left() + 58.0, row_y2 - 9.0),
+                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
+                        );
+                        ui.put(
+                            params_rect,
+                            egui::TextEdit::singleline(params).hint_text("param1, param2"),
+                        );
                     }
                     NodeKind::FunctionCall { name } => {
-                        let name_rect = Rect::from_min_size(
-                            screen_pos + Vec2::new(8.0, TITLE_HEIGHT + 2.0),
-                            Vec2::new(NODE_WIDTH - 16.0, ROW_HEIGHT - 4.0),
+                        let row_y = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 0.5;
+                        let painter = ui.painter();
+                        painter.text(
+                            Pos2::new(node_rect.left() + 12.0, row_y),
+                            Align2::LEFT_CENTER,
+                            "Name",
+                            FontId::proportional(12.0),
+                            theme::TEXT_MUTED,
                         );
-                        ui.put(name_rect, egui::TextEdit::singleline(name).hint_text("function name"));
+                        let name_rect = Rect::from_min_size(
+                            Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
+                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
+                        );
+                        ui.put(
+                            name_rect,
+                            egui::TextEdit::singleline(name).hint_text("function name"),
+                        );
                     }
                     _ => {}
                 }
@@ -1738,24 +2592,36 @@ impl eframe::App for BlockoApp {
                 let exec_rows = exec_in_labels.len().max(exec_out_labels.len());
 
                 for row in 0..exec_rows {
-                    let row_y = screen_pos.y + TITLE_HEIGHT + widget_extra + BODY_PADDING + ROW_HEIGHT * row as f32 + ROW_HEIGHT * 0.5;
+                    let row_y = screen_pos.y
+                        + TITLE_HEIGHT
+                        + widget_extra
+                        + BODY_PADDING
+                        + ROW_HEIGHT * row as f32
+                        + ROW_HEIGHT * 0.5;
 
                     if row < exec_in_labels.len() {
                         let pin_pos = Pos2::new(node_rect.left(), row_y);
-                        let pin_ref = PinRef { node_id, kind: PinKind::Input, index: row, is_exec: true };
+                        let pin_ref = PinRef {
+                            node_id,
+                            kind: PinKind::Input,
+                            index: row,
+                            is_exec: true,
+                        };
                         self.pin_positions.insert(pin_ref, pin_pos);
 
+                        let connected = is_input_connected(&self.connections, pin_ref);
                         let painter = ui.painter();
-                        painter.circle_filled(pin_pos, PIN_RADIUS, pin_color(PinKind::Input, PinDataType::Exec));
+                        draw_pin(painter, pin_pos, pin_color(PinDataType::Exec), connected);
                         painter.text(
                             pin_pos + Vec2::new(10.0, 0.0),
                             Align2::LEFT_CENTER,
                             exec_in_labels[row],
                             FontId::proportional(12.0),
-                            Color32::from_gray(220),
+                            theme::TEXT_MUTED,
                         );
 
-                        let pin_rect = Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
+                        let pin_rect =
+                            Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
                         let pin_id = ui.id().with(("pin", node_id, "exec_in", row));
                         let pin_response = ui.interact(pin_rect, pin_id, Sense::click_and_drag());
 
@@ -1765,7 +2631,10 @@ impl eframe::App for BlockoApp {
                                     && dragging.from.is_exec
                                     && ctx.input(|i| i.pointer.any_released())
                                 {
-                                    new_connection = Some(Connection { from: dragging.from, to: pin_ref });
+                                    new_connection = Some(Connection {
+                                        from: dragging.from,
+                                        to: pin_ref,
+                                    });
                                 }
                             }
                         }
@@ -1773,25 +2642,35 @@ impl eframe::App for BlockoApp {
 
                     if row < exec_out_labels.len() {
                         let pin_pos = Pos2::new(node_rect.right(), row_y);
-                        let pin_ref = PinRef { node_id, kind: PinKind::Output, index: row, is_exec: true };
+                        let pin_ref = PinRef {
+                            node_id,
+                            kind: PinKind::Output,
+                            index: row,
+                            is_exec: true,
+                        };
                         self.pin_positions.insert(pin_ref, pin_pos);
 
+                        let connected = is_output_connected(&self.connections, pin_ref);
                         let painter = ui.painter();
-                        painter.circle_filled(pin_pos, PIN_RADIUS, pin_color(PinKind::Output, PinDataType::Exec));
+                        draw_pin(painter, pin_pos, pin_color(PinDataType::Exec), connected);
                         painter.text(
                             pin_pos - Vec2::new(10.0, 0.0),
                             Align2::RIGHT_CENTER,
                             exec_out_labels[row],
                             FontId::proportional(12.0),
-                            Color32::from_gray(220),
+                            theme::TEXT_MUTED,
                         );
 
-                        let pin_rect = Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
+                        let pin_rect =
+                            Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
                         let pin_id = ui.id().with(("pin", node_id, "exec_out", row));
                         let pin_response = ui.interact(pin_rect, pin_id, Sense::click_and_drag());
 
                         if pin_response.drag_started() {
-                            self.dragging_connection = Some(DraggingConnection { from: pin_ref, current_pos: pin_pos });
+                            self.dragging_connection = Some(DraggingConnection {
+                                from: pin_ref,
+                                current_pos: pin_pos,
+                            });
                         }
                     }
                 }
@@ -1801,28 +2680,39 @@ impl eframe::App for BlockoApp {
                 let input_types = node.kind.input_types();
                 let output_types = node.kind.output_types();
                 let data_rows = input_labels.len().max(output_labels.len()).max(1);
-                let data_base_y = screen_pos.y + TITLE_HEIGHT + widget_extra + BODY_PADDING + exec_rows as f32 * ROW_HEIGHT;
+                let data_base_y = screen_pos.y
+                    + TITLE_HEIGHT
+                    + widget_extra
+                    + BODY_PADDING
+                    + exec_rows as f32 * ROW_HEIGHT;
 
                 for row in 0..data_rows {
                     let row_y = data_base_y + ROW_HEIGHT * row as f32 + ROW_HEIGHT * 0.5;
 
                     if row < input_labels.len() {
                         let pin_pos = Pos2::new(node_rect.left(), row_y);
-                        let pin_ref = PinRef { node_id, kind: PinKind::Input, index: row, is_exec: false };
+                        let pin_ref = PinRef {
+                            node_id,
+                            kind: PinKind::Input,
+                            index: row,
+                            is_exec: false,
+                        };
                         self.pin_positions.insert(pin_ref, pin_pos);
 
-                        let color = pin_color(PinKind::Input, input_types[row]);
+                        let color = pin_color(input_types[row]);
+                        let connected = is_input_connected(&self.connections, pin_ref);
                         let painter = ui.painter();
-                        painter.circle_filled(pin_pos, PIN_RADIUS, color);
+                        draw_pin(painter, pin_pos, color, connected);
                         painter.text(
                             pin_pos + Vec2::new(10.0, 0.0),
                             Align2::LEFT_CENTER,
                             input_labels[row],
                             FontId::proportional(12.0),
-                            Color32::from_gray(200),
+                            theme::TEXT_MUTED,
                         );
 
-                        let pin_rect = Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
+                        let pin_rect =
+                            Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
                         let pin_id = ui.id().with(("pin", node_id, "in", row));
                         let pin_response = ui.interact(pin_rect, pin_id, Sense::click_and_drag());
 
@@ -1832,7 +2722,10 @@ impl eframe::App for BlockoApp {
                                     && !dragging.from.is_exec
                                     && ctx.input(|i| i.pointer.any_released())
                                 {
-                                    new_connection = Some(Connection { from: dragging.from, to: pin_ref });
+                                    new_connection = Some(Connection {
+                                        from: dragging.from,
+                                        to: pin_ref,
+                                    });
                                 }
                             }
                         }
@@ -1840,26 +2733,36 @@ impl eframe::App for BlockoApp {
 
                     if row < output_labels.len() {
                         let pin_pos = Pos2::new(node_rect.right(), row_y);
-                        let pin_ref = PinRef { node_id, kind: PinKind::Output, index: row, is_exec: false };
+                        let pin_ref = PinRef {
+                            node_id,
+                            kind: PinKind::Output,
+                            index: row,
+                            is_exec: false,
+                        };
                         self.pin_positions.insert(pin_ref, pin_pos);
 
-                        let color = pin_color(PinKind::Output, output_types[row]);
+                        let color = pin_color(output_types[row]);
+                        let connected = is_output_connected(&self.connections, pin_ref);
                         let painter = ui.painter();
-                        painter.circle_filled(pin_pos, PIN_RADIUS, color);
+                        draw_pin(painter, pin_pos, color, connected);
                         painter.text(
                             pin_pos - Vec2::new(10.0, 0.0),
                             Align2::RIGHT_CENTER,
                             output_labels[row],
                             FontId::proportional(12.0),
-                            Color32::from_gray(200),
+                            theme::TEXT_MUTED,
                         );
 
-                        let pin_rect = Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
+                        let pin_rect =
+                            Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
                         let pin_id = ui.id().with(("pin", node_id, "out", row));
                         let pin_response = ui.interact(pin_rect, pin_id, Sense::click_and_drag());
 
                         if pin_response.drag_started() {
-                            self.dragging_connection = Some(DraggingConnection { from: pin_ref, current_pos: pin_pos });
+                            self.dragging_connection = Some(DraggingConnection {
+                                from: pin_ref,
+                                current_pos: pin_pos,
+                            });
                         }
                     }
                 }
@@ -1882,9 +2785,9 @@ impl eframe::App for BlockoApp {
 
                 if let Some(&from_pos) = self.pin_positions.get(&dragging.from) {
                     let color = if dragging.from.is_exec {
-                        Color32::from_rgb(255, 255, 255)
+                        theme::PIN_EXEC
                     } else {
-                        Color32::from_rgb(255, 210, 120)
+                        theme::ACCENT_NUMBERS
                     };
                     draw_wire(ui.painter(), from_pos, dragging.current_pos, color);
                 }
