@@ -1,0 +1,11 @@
+/home/skvanchi/Projects/Blocko/target/debug/deps/egui_glow-49fd99e0b17c7806.d: /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/lib.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/painter.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/misc_util.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader_version.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/vao.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader/vertex.glsl /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader/fragment.glsl
+
+/home/skvanchi/Projects/Blocko/target/debug/deps/libegui_glow-49fd99e0b17c7806.rmeta: /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/lib.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/painter.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/misc_util.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader_version.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/vao.rs /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader/vertex.glsl /home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader/fragment.glsl
+
+/home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/lib.rs:
+/home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/painter.rs:
+/home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/misc_util.rs:
+/home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader_version.rs:
+/home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/vao.rs:
+/home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader/vertex.glsl:
+/home/skvanchi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_glow-0.29.1/src/shader/fragment.glsl:
