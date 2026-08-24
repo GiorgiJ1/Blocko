@@ -247,6 +247,129 @@ struct DraggingConnection {
     current_pos: Pos2,
 }
 
+// ---------------------------------------------------------------------
+// Camera: pan/zoom state shared by the canvas and the mini-map.
+// World space = node.pos coordinates (what gets saved to disk).
+// Screen space = actual egui pixels inside the CentralPanel.
+// ---------------------------------------------------------------------
+#[derive(Debug, Clone, Copy)]
+struct Camera {
+    /// World-space point that appears at the canvas's top-left corner.
+    pan: Vec2,
+    /// Uniform zoom multiplier. 1.0 = 100%.
+    zoom: f32,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self { pan: Vec2::ZERO, zoom: 1.0 }
+    }
+}
+
+impl Camera {
+    const MIN_ZOOM: f32 = 0.15;
+    const MAX_ZOOM: f32 = 2.5;
+
+    fn world_to_screen(&self, canvas_origin: Pos2, world: Pos2) -> Pos2 {
+        canvas_origin + (world.to_vec2() - self.pan) * self.zoom
+    }
+
+    fn screen_to_world(&self, canvas_origin: Pos2, screen: Pos2) -> Pos2 {
+        ((screen - canvas_origin) / self.zoom).to_pos2() + self.pan
+    }
+
+    /// The world-space rectangle currently visible inside `canvas_rect`.
+    fn visible_world_rect(&self, canvas_origin: Pos2, canvas_rect: Rect) -> Rect {
+        Rect::from_min_max(
+            self.screen_to_world(canvas_origin, canvas_rect.min),
+            self.screen_to_world(canvas_origin, canvas_rect.max),
+        )
+    }
+
+    /// Re-centers the camera on a given world-space point, keeping zoom fixed.
+    fn center_on(&mut self, canvas_rect: Rect, world_point: Pos2) {
+        let half_extent = canvas_rect.size() / (2.0 * self.zoom);
+        self.pan = world_point.to_vec2() - half_extent;
+    }
+
+    fn zoom_at(&mut self, canvas_origin: Pos2, screen_anchor: Pos2, factor: f32) {
+        let world_anchor_before = self.screen_to_world(canvas_origin, screen_anchor);
+        self.zoom = (self.zoom * factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        let world_anchor_after = self.screen_to_world(canvas_origin, screen_anchor);
+        // Keep the point under the cursor stationary while zooming.
+        self.pan += world_anchor_before.to_vec2() - world_anchor_after.to_vec2();
+    }
+}
+
+// ---------------------------------------------------------------------
+// Stage 14: Universal Quick Search (Space / Ctrl+K)
+// ---------------------------------------------------------------------
+
+/// One spawnable entry in the quick-search catalog. `factory` builds the
+/// NodeKind fresh each time so text fields (names, params) get sane defaults.
+struct SearchEntry {
+    label: &'static str,
+    category: &'static str,
+    keywords: &'static str,
+    factory: fn() -> NodeKind,
+}
+
+fn search_catalog() -> Vec<SearchEntry> {
+    vec![
+        SearchEntry { label: "Number", category: "Numbers", keywords: "number literal value const", factory: || NodeKind::Number(0.0) },
+        SearchEntry { label: "Math (Add)", category: "Numbers", keywords: "math add plus sum +", factory: || NodeKind::Add },
+        SearchEntry { label: "Math (Subtract)", category: "Numbers", keywords: "math sub subtract minus -", factory: || NodeKind::Sub },
+        SearchEntry { label: "Math (Multiply)", category: "Numbers", keywords: "math mul multiply times *", factory: || NodeKind::Mul },
+        SearchEntry { label: "Math (Divide)", category: "Numbers", keywords: "math div divide /", factory: || NodeKind::Div },
+        SearchEntry { label: "Compare", category: "Logic", keywords: "compare greater less equal condition", factory: || NodeKind::Compare(CompareOp::GreaterThan) },
+        SearchEntry { label: "If / Else", category: "Logic", keywords: "branch if else condition", factory: || NodeKind::Branch },
+        SearchEntry { label: "Logic (AND)", category: "Logic", keywords: "and logic boolean", factory: || NodeKind::And },
+        SearchEntry { label: "Logic (OR)", category: "Logic", keywords: "or logic boolean", factory: || NodeKind::Or },
+        SearchEntry { label: "Logic (NOT)", category: "Logic", keywords: "not logic invert boolean", factory: || NodeKind::Not },
+        SearchEntry { label: "Start", category: "Flow", keywords: "start entry begin main", factory: || NodeKind::Start },
+        SearchEntry { label: "Set Variable", category: "Flow", keywords: "set variable assign store", factory: || NodeKind::SetVariable("x".to_string()) },
+        SearchEntry { label: "Get Variable", category: "Flow", keywords: "get variable read fetch", factory: || NodeKind::GetVariable("x".to_string()) },
+        SearchEntry { label: "While Loop", category: "Flow", keywords: "while loop repeat iterate", factory: || NodeKind::WhileLoop },
+        SearchEntry { label: "Print", category: "Flow", keywords: "print log output console", factory: || NodeKind::Print },
+        SearchEntry { label: "Function Def", category: "Functions", keywords: "function def define declare", factory: || NodeKind::FunctionDef { name: "my_func".to_string(), params: "a, b".to_string() } },
+        SearchEntry { label: "Call Function", category: "Functions", keywords: "call function invoke run", factory: || NodeKind::FunctionCall { name: "my_func".to_string() } },
+        SearchEntry { label: "Return", category: "Functions", keywords: "return exit result", factory: || NodeKind::Return },
+    ]
+}
+
+struct QuickSearchState {
+    open: bool,
+    query: String,
+    selected: usize,
+    /// World-space point where a spawned node should land (canvas center at
+    /// the moment the search was opened, so nodes appear where you're looking).
+    spawn_at: Pos2,
+}
+
+impl Default for QuickSearchState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            query: String::new(),
+            selected: 0,
+            spawn_at: Pos2::ZERO,
+        }
+    }
+}
+
+impl QuickSearchState {
+    fn open_at_cursor(&mut self) {
+        self.open = true;
+        self.query.clear();
+        self.selected = 0;
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.query.clear();
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Value {
     Number(f32),
@@ -1128,7 +1251,7 @@ fn code_preview_view(ui: &mut egui::Ui, code: &str, lang: TargetLanguage) {
         });
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SerializableNode {
     id: NodeId,
     kind: NodeKind,
@@ -1142,6 +1265,283 @@ struct ProjectFile {
     next_id: NodeId,
     nodes: Vec<SerializableNode>,
     connections: Vec<Connection>,
+}
+
+// =======================================================================
+// Stage 15a: Project Package System
+//
+// Moves Blocko away from a single monolithic JSON file into a directory:
+//
+//   MyBlockoProject/
+//     project.blocko        <- manifest (JSON): metadata + pointers to graphs
+//     nodes/
+//       main.graph.json      <- the root graph (nodes + connections)
+//       <function>.graph.json <- (future) one file per sub-graph / function
+//     assets/
+//       (images, audio, data files referenced by nodes — plain std::fs)
+//
+// This mirrors how most real engines separate "project settings" from
+// "content" so that content files are diff-friendly and can be version
+// controlled / partially loaded.
+// =======================================================================
+mod project {
+    use super::{Connection, NodeId, SerializableNode};
+    use serde::{Deserialize, Serialize};
+    use std::path::{Path, PathBuf};
+
+    pub const MANIFEST_FILE: &str = "project.blocko";
+    pub const NODES_DIR: &str = "nodes";
+    pub const ASSETS_DIR: &str = "assets";
+    pub const MAIN_GRAPH_FILE: &str = "main.graph.json";
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct ProjectManifest {
+        pub format_version: u32,
+        pub project_name: String,
+        /// Path (relative to the project root) of the graph to load on open.
+        pub entry_graph: String,
+        pub next_id: NodeId,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct GraphFile {
+        pub nodes: Vec<SerializableNode>,
+        pub connections: Vec<Connection>,
+    }
+
+    #[derive(Debug)]
+    pub enum PackageError {
+        Io(String),
+        Serde(String),
+    }
+
+    impl std::fmt::Display for PackageError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                PackageError::Io(e) => write!(f, "IO error: {}", e),
+                PackageError::Serde(e) => write!(f, "Serialization error: {}", e),
+            }
+        }
+    }
+
+    impl From<std::io::Error> for PackageError {
+        fn from(e: std::io::Error) -> Self {
+            PackageError::Io(e.to_string())
+        }
+    }
+    impl From<serde_json::Error> for PackageError {
+        fn from(e: serde_json::Error) -> Self {
+            PackageError::Serde(e.to_string())
+        }
+    }
+
+    /// Creates `project_dir/{project.blocko, nodes/, assets/}` and writes the
+    /// current graph into `nodes/main.graph.json`. Safe to call repeatedly
+    /// (idempotent directory creation via `create_dir_all`).
+    pub fn save_package(
+        project_dir: &Path,
+        project_name: &str,
+        next_id: NodeId,
+        nodes: Vec<SerializableNode>,
+        connections: Vec<Connection>,
+    ) -> Result<(), PackageError> {
+        let nodes_dir = project_dir.join(NODES_DIR);
+        let assets_dir = project_dir.join(ASSETS_DIR);
+        std::fs::create_dir_all(&nodes_dir)?;
+        std::fs::create_dir_all(&assets_dir)?;
+
+        let graph = GraphFile { nodes, connections };
+        let graph_path = nodes_dir.join(MAIN_GRAPH_FILE);
+        std::fs::write(&graph_path, serde_json::to_string_pretty(&graph)?)?;
+
+        let manifest = ProjectManifest {
+            format_version: 1,
+            project_name: project_name.to_string(),
+            entry_graph: format!("{}/{}", NODES_DIR, MAIN_GRAPH_FILE),
+            next_id,
+        };
+        let manifest_path = project_dir.join(MANIFEST_FILE);
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+
+        Ok(())
+    }
+
+    /// Reads `project.blocko`, follows `entry_graph`, and returns the parsed
+    /// manifest + graph contents.
+    pub fn load_package(
+        project_dir: &Path,
+    ) -> Result<(ProjectManifest, GraphFile), PackageError> {
+        let manifest_path = project_dir.join(MANIFEST_FILE);
+        let manifest_text = std::fs::read_to_string(&manifest_path)?;
+        let manifest: ProjectManifest = serde_json::from_str(&manifest_text)?;
+
+        let graph_path = project_dir.join(&manifest.entry_graph);
+        let graph_text = std::fs::read_to_string(&graph_path)?;
+        let graph: GraphFile = serde_json::from_str(&graph_text)?;
+
+        Ok((manifest, graph))
+    }
+
+    /// Lists asset filenames under `project_dir/assets/` (non-recursive).
+    /// Nodes that reference textures/audio/data files can use this to
+    /// populate a picker without hardcoding paths.
+    pub fn list_assets(project_dir: &Path) -> Result<Vec<PathBuf>, PackageError> {
+        let assets_dir = project_dir.join(ASSETS_DIR);
+        if !assets_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&assets_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                out.push(entry.path());
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Copies an external file into `project_dir/assets/`, returning the
+    /// path stored nodes should reference (relative to the project root).
+    pub fn import_asset(project_dir: &Path, source: &Path) -> Result<String, PackageError> {
+        let assets_dir = project_dir.join(ASSETS_DIR);
+        std::fs::create_dir_all(&assets_dir)?;
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| PackageError::Io("source path has no file name".to_string()))?;
+        let dest = assets_dir.join(file_name);
+        std::fs::copy(source, &dest)?;
+        Ok(format!("{}/{}", ASSETS_DIR, file_name.to_string_lossy()))
+    }
+}
+
+// =======================================================================
+// Stage 15b: AI Graph Schema
+//
+// A deliberately simple, string-keyed serializable representation of a node
+// graph that an LLM (or any external tool) can emit from a text prompt,
+// without needing to know Blocko's internal enums/PinRef machinery. Blocko
+// converts this into real `Node`/`Connection` values via `import_ai_graph`,
+// which runs BEFORE type-checking/compiling so malformed graphs are caught
+// early instead of surfacing as confusing IR/codegen errors.
+// =======================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AiNodeSpec {
+    /// Caller-assigned id, unique within this schema. Remapped internally on
+    /// import so it never collides with existing project node ids.
+    id: u64,
+    /// String tag for the node kind: "Number", "Add", "Sub", "Mul", "Div",
+    /// "Print", "Compare", "Branch", "And", "Or", "Not", "Start",
+    /// "SetVariable", "GetVariable", "WhileLoop", "FunctionDef",
+    /// "FunctionCall", "Return".
+    kind: String,
+    #[serde(default)]
+    number_value: Option<f32>,
+    #[serde(default)]
+    compare_op: Option<String>, // "GreaterThan" | "LessThan" | "EqualTo"
+    #[serde(default)]
+    variable_name: Option<String>, // SetVariable / GetVariable
+    #[serde(default)]
+    function_name: Option<String>, // FunctionDef / FunctionCall
+    #[serde(default)]
+    function_params: Option<String>, // FunctionDef
+    #[serde(default)]
+    x: f32,
+    #[serde(default)]
+    y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AiConnectionSpec {
+    from_node: u64,
+    from_index: usize,
+    from_exec: bool,
+    to_node: u64,
+    to_index: usize,
+    to_exec: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AiGraphSchema {
+    schema_version: u32,
+    #[serde(default)]
+    source_prompt: Option<String>,
+    nodes: Vec<AiNodeSpec>,
+    connections: Vec<AiConnectionSpec>,
+}
+
+/// Errors caught while ingesting an AI-generated graph, before it ever
+/// reaches IR construction or code emission.
+#[derive(Debug)]
+enum AiImportError {
+    UnknownKind { node_id: u64, kind: String },
+    DuplicateNodeId(u64),
+    DanglingConnection { node_id: u64 },
+}
+
+impl std::fmt::Display for AiImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AiImportError::UnknownKind { node_id, kind } => {
+                write!(f, "node {} has unknown kind \"{}\"", node_id, kind)
+            }
+            AiImportError::DuplicateNodeId(id) => {
+                write!(f, "duplicate node id {} in AI graph", id)
+            }
+            AiImportError::DanglingConnection { node_id } => {
+                write!(f, "connection references missing node {}", node_id)
+            }
+        }
+    }
+}
+
+impl AiNodeSpec {
+    fn to_node_kind(&self) -> Result<NodeKind, AiImportError> {
+        let kind = match self.kind.as_str() {
+            "Number" => NodeKind::Number(self.number_value.unwrap_or(0.0)),
+            "Add" => NodeKind::Add,
+            "Sub" => NodeKind::Sub,
+            "Mul" => NodeKind::Mul,
+            "Div" => NodeKind::Div,
+            "Print" => NodeKind::Print,
+            "Compare" => {
+                let op = match self.compare_op.as_deref() {
+                    Some("LessThan") => CompareOp::LessThan,
+                    Some("EqualTo") => CompareOp::EqualTo,
+                    _ => CompareOp::GreaterThan,
+                };
+                NodeKind::Compare(op)
+            }
+            "Branch" => NodeKind::Branch,
+            "And" => NodeKind::And,
+            "Or" => NodeKind::Or,
+            "Not" => NodeKind::Not,
+            "Start" => NodeKind::Start,
+            "SetVariable" => {
+                NodeKind::SetVariable(self.variable_name.clone().unwrap_or_else(|| "x".into()))
+            }
+            "GetVariable" => {
+                NodeKind::GetVariable(self.variable_name.clone().unwrap_or_else(|| "x".into()))
+            }
+            "WhileLoop" => NodeKind::WhileLoop,
+            "FunctionDef" => NodeKind::FunctionDef {
+                name: self.function_name.clone().unwrap_or_else(|| "func".into()),
+                params: self.function_params.clone().unwrap_or_default(),
+            },
+            "FunctionCall" => NodeKind::FunctionCall {
+                name: self.function_name.clone().unwrap_or_else(|| "func".into()),
+            },
+            "Return" => NodeKind::Return,
+            other => {
+                return Err(AiImportError::UnknownKind {
+                    node_id: self.id,
+                    kind: other.to_string(),
+                })
+            }
+        };
+        Ok(kind)
+    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -1186,6 +1586,16 @@ struct BlockoApp {
     status_message: String,
     console_lines: Vec<String>,
     current_language: TargetLanguage,
+
+    // --- Mini-map / camera ---
+    camera: Camera,
+    minimap_dragging: bool,
+
+    // --- Stage 14: Universal Quick Search ---
+    quick_search: QuickSearchState,
+
+    // --- Stage 15: Project package system ---
+    project_dir: std::path::PathBuf,
 }
 
 impl BlockoApp {
@@ -1199,6 +1609,10 @@ impl BlockoApp {
             status_message: "Ready.".to_string(),
             console_lines: Vec::new(),
             current_language: TargetLanguage::Python,
+            camera: Camera::default(),
+            minimap_dragging: false,
+            quick_search: QuickSearchState::default(),
+            project_dir: std::path::PathBuf::from("./MyBlockoProject"),
         }
     }
 
@@ -1211,6 +1625,268 @@ impl BlockoApp {
 
         self.status_message = format!("Added node: {}", kind.title());
         self.nodes.insert(id, Node { id, kind, pos });
+    }
+
+    /// Spawns a node at an explicit world-space position (used by quick search).
+    fn add_node_at(&mut self, kind: NodeKind, pos: Pos2) -> NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.status_message = format!("Added node: {}", kind.title());
+        self.nodes.insert(id, Node { id, kind, pos });
+        id
+    }
+
+    /// Stage 14: Auto-Layout. Arranges nodes into left-to-right layers based on
+    /// their dependency depth (how many hops from a "root" node with no
+    /// incoming connections), then orders nodes within each layer using a
+    /// barycenter heuristic (average position of parents in the previous
+    /// layer) to reduce wire crossings. This is a simplified Sugiyama-style
+    /// layered layout — good enough for blueprint-style graphs without
+    /// pulling in an external graph-layout crate.
+    fn auto_arrange(&mut self) {
+        let node_ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        if node_ids.is_empty() {
+            self.status_message = "Nothing to arrange.".to_string();
+            return;
+        }
+
+        let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut parents: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for &id in &node_ids {
+            children.insert(id, Vec::new());
+            parents.insert(id, Vec::new());
+        }
+        for conn in &self.connections {
+            let (a, b) = (conn.from.node_id, conn.to.node_id);
+            if a == b {
+                continue;
+            }
+            if let Some(v) = children.get_mut(&a) {
+                if !v.contains(&b) {
+                    v.push(b);
+                }
+            }
+            if let Some(v) = parents.get_mut(&b) {
+                if !v.contains(&a) {
+                    v.push(a);
+                }
+            }
+        }
+
+        fn compute_depth(
+            id: NodeId,
+            parents: &HashMap<NodeId, Vec<NodeId>>,
+            depth: &mut HashMap<NodeId, i32>,
+            visiting: &mut HashSet<NodeId>,
+        ) -> i32 {
+            if let Some(&d) = depth.get(&id) {
+                return d;
+            }
+            if !visiting.insert(id) {
+                // Back-edge (e.g. a While Loop feeding into an earlier node):
+                // stop recursing here instead of looping forever.
+                return 0;
+            }
+            let mut best = 0;
+            for &p in parents.get(&id).map(|v| v.as_slice()).unwrap_or(&[]) {
+                best = best.max(compute_depth(p, parents, depth, visiting) + 1);
+            }
+            visiting.remove(&id);
+            depth.insert(id, best);
+            best
+        }
+
+        let mut depth: HashMap<NodeId, i32> = HashMap::new();
+        for &id in &node_ids {
+            let mut visiting = HashSet::new();
+            compute_depth(id, &parents, &mut depth, &mut visiting);
+        }
+
+        let max_depth = depth.values().copied().max().unwrap_or(0);
+        let mut layers: Vec<Vec<NodeId>> = vec![Vec::new(); (max_depth + 1) as usize];
+        for &id in &node_ids {
+            let d = depth.get(&id).copied().unwrap_or(0).max(0) as usize;
+            layers[d].push(id);
+        }
+        for layer in &mut layers {
+            layer.sort_unstable();
+        }
+
+        // Barycenter crossing-reduction passes.
+        let mut order_index: HashMap<NodeId, f32> = HashMap::new();
+        for layer in &layers {
+            for (i, &id) in layer.iter().enumerate() {
+                order_index.insert(id, i as f32);
+            }
+        }
+        for _pass in 0..4 {
+            for li in 1..layers.len() {
+                let prev_index: HashMap<NodeId, f32> = layers[li - 1]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| (id, i as f32))
+                    .collect();
+                let mut scored: Vec<(NodeId, f32)> = layers[li]
+                    .iter()
+                    .map(|&id| {
+                        let ps = parents.get(&id).map(|v| v.as_slice()).unwrap_or(&[]);
+                        let linked: Vec<f32> =
+                            ps.iter().filter_map(|p| prev_index.get(p)).copied().collect();
+                        let score = if linked.is_empty() {
+                            order_index.get(&id).copied().unwrap_or(0.0)
+                        } else {
+                            linked.iter().sum::<f32>() / linked.len() as f32
+                        };
+                        (id, score)
+                    })
+                    .collect();
+                scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                layers[li] = scored.iter().map(|(id, _)| *id).collect();
+                for (i, &id) in layers[li].iter().enumerate() {
+                    order_index.insert(id, i as f32);
+                }
+            }
+        }
+
+        const COL_GAP: f32 = 260.0;
+        const ROW_GAP: f32 = 40.0;
+
+        let mut cursor_x = 0.0;
+        for layer in &layers {
+            let mut cursor_y = 0.0;
+            for &id in layer {
+                let h = BlockoApp::node_height(&self.nodes[&id].kind);
+                if let Some(node) = self.nodes.get_mut(&id) {
+                    node.pos = Pos2::new(cursor_x, cursor_y);
+                }
+                cursor_y += h + ROW_GAP;
+            }
+            cursor_x += NODE_WIDTH + COL_GAP;
+        }
+
+        self.pin_positions.clear();
+        self.status_message = format!(
+            "Arranged {} nodes across {} layer(s).",
+            node_ids.len(),
+            layers.len()
+        );
+    }
+
+    /// Renders the Space/Ctrl+K quick-search modal and handles keyboard
+    /// navigation + spawning the selected node.
+    fn show_quick_search_overlay(&mut self, ctx: &egui::Context) {
+        if !self.quick_search.open {
+            return;
+        }
+
+        let catalog = search_catalog();
+        let query_lower = self.quick_search.query.to_lowercase();
+        let mut matches: Vec<usize> = (0..catalog.len())
+            .filter(|&i| {
+                if query_lower.is_empty() {
+                    return true;
+                }
+                let entry = &catalog[i];
+                entry.label.to_lowercase().contains(&query_lower)
+                    || entry.category.to_lowercase().contains(&query_lower)
+                    || entry.keywords.contains(&query_lower)
+            })
+            .collect();
+        // Stable, readable ordering: category then label.
+        matches.sort_by_key(|&i| (catalog[i].category, catalog[i].label));
+
+        if self.quick_search.selected >= matches.len() {
+            self.quick_search.selected = matches.len().saturating_sub(1);
+        }
+
+        let mut close_after = false;
+        let mut spawn_choice: Option<usize> = None;
+
+        egui::Window::new("quick_search")
+            .title_bar(false)
+            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 90.0))
+            .fixed_size(Vec2::new(420.0, 360.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("🔍").size(16.0));
+                    let text_response = ui.add(
+                        egui::TextEdit::singleline(&mut self.quick_search.query)
+                            .hint_text("Search nodes… (e.g. \"math\", \"pri\")")
+                            .desired_width(360.0),
+                    );
+                    text_response.request_focus();
+                });
+                ui.add_space(4.0);
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if matches.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No matching nodes.")
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        }
+                        for (row, &catalog_idx) in matches.iter().enumerate() {
+                            let entry = &catalog[catalog_idx];
+                            let selected = row == self.quick_search.selected;
+                            let text = egui::RichText::new(format!(
+                                "{}   ·   {}",
+                                entry.label, entry.category
+                            ))
+                            .color(if selected {
+                                theme::TEXT_PRIMARY
+                            } else {
+                                theme::TEXT_MUTED
+                            });
+                            let resp = ui.selectable_label(selected, text);
+                            if resp.clicked() {
+                                spawn_choice = Some(catalog_idx);
+                            }
+                            if resp.hovered() {
+                                self.quick_search.selected = row;
+                            }
+                        }
+                    });
+
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("↑↓ navigate · Enter spawn · Esc close")
+                        .size(10.5)
+                        .color(theme::TEXT_MUTED),
+                );
+            });
+
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) {
+                close_after = true;
+            }
+            if i.key_pressed(egui::Key::ArrowDown) && !matches.is_empty() {
+                self.quick_search.selected = (self.quick_search.selected + 1) % matches.len();
+            }
+            if i.key_pressed(egui::Key::ArrowUp) && !matches.is_empty() {
+                self.quick_search.selected =
+                    (self.quick_search.selected + matches.len() - 1) % matches.len();
+            }
+            if i.key_pressed(egui::Key::Enter) && !matches.is_empty() {
+                spawn_choice = Some(matches[self.quick_search.selected]);
+            }
+        });
+
+        if let Some(catalog_idx) = spawn_choice {
+            let kind = (catalog[catalog_idx].factory)();
+            let spawn_at = self.quick_search.spawn_at;
+            self.add_node_at(kind, spawn_at);
+            close_after = true;
+        }
+
+        if close_after {
+            self.quick_search.close();
+        }
     }
 
     fn node_height(kind: &NodeKind) -> f32 {
@@ -2118,6 +2794,199 @@ impl BlockoApp {
             self.connections.len()
         );
     }
+
+    /// Stage 15: writes the current graph as a project package directory
+    /// (`project.blocko` + `nodes/` + `assets/`) at `self.project_dir`.
+    fn save_project_package(&mut self) {
+        let mut nodes: Vec<SerializableNode> = self
+            .nodes
+            .values()
+            .map(|n| SerializableNode {
+                id: n.id,
+                kind: n.kind.clone(),
+                x: n.pos.x,
+                y: n.pos.y,
+            })
+            .collect();
+        nodes.sort_by_key(|n| n.id);
+
+        let project_name = self
+            .project_dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "BlockoProject".to_string());
+
+        match project::save_package(
+            &self.project_dir,
+            &project_name,
+            self.next_id,
+            nodes,
+            self.connections.clone(),
+        ) {
+            Ok(()) => {
+                self.status_message =
+                    format!("Project package saved to {}", self.project_dir.display());
+            }
+            Err(e) => {
+                self.status_message = format!("Package save failed: {}", e);
+            }
+        }
+    }
+
+    /// Stage 15: loads a project package directory written by
+    /// `save_project_package`.
+    fn load_project_package(&mut self) {
+        match project::load_package(&self.project_dir) {
+            Ok((manifest, graph)) => {
+                self.nodes.clear();
+                self.connections.clear();
+                self.pin_positions.clear();
+                self.dragging_connection = None;
+                self.console_lines.clear();
+
+                for sn in graph.nodes {
+                    self.nodes.insert(
+                        sn.id,
+                        Node {
+                            id: sn.id,
+                            kind: sn.kind,
+                            pos: Pos2::new(sn.x, sn.y),
+                        },
+                    );
+                }
+                self.connections = graph.connections;
+                self.next_id = manifest.next_id;
+
+                self.status_message = format!(
+                    "Loaded package \"{}\" ({} nodes, {} connections)",
+                    manifest.project_name,
+                    self.nodes.len(),
+                    self.connections.len()
+                );
+            }
+            Err(e) => {
+                self.status_message = format!(
+                    "Package load failed from {}: {}",
+                    self.project_dir.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    /// Stage 15: ingests an AI/externally-generated graph schema, validating
+    /// it and remapping ids before merging it into the live graph. Runs
+    /// ahead of type-checking/compiling so bad input fails fast with a
+    /// readable error instead of a confusing IR or codegen crash.
+    fn import_ai_graph(&mut self, schema: &AiGraphSchema) -> Result<usize, Vec<AiImportError>> {
+        let mut errors = Vec::new();
+        let mut seen_ids: HashSet<u64> = HashSet::new();
+        for spec in &schema.nodes {
+            if !seen_ids.insert(spec.id) {
+                errors.push(AiImportError::DuplicateNodeId(spec.id));
+            }
+        }
+        for conn in &schema.connections {
+            if !seen_ids.contains(&conn.from_node) {
+                errors.push(AiImportError::DanglingConnection { node_id: conn.from_node });
+            }
+            if !seen_ids.contains(&conn.to_node) {
+                errors.push(AiImportError::DanglingConnection { node_id: conn.to_node });
+            }
+        }
+
+        // Pre-resolve every NodeKind so an unknown-kind error is reported
+        // before we mutate any state.
+        let mut resolved_kinds: HashMap<u64, NodeKind> = HashMap::new();
+        for spec in &schema.nodes {
+            match spec.to_node_kind() {
+                Ok(kind) => {
+                    resolved_kinds.insert(spec.id, kind);
+                }
+                Err(e) => errors.push(e),
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+
+        // Remap AI-schema ids -> fresh internal NodeIds so imports never
+        // collide with the existing graph.
+        let mut id_map: HashMap<u64, NodeId> = HashMap::new();
+        let mut inserted = 0usize;
+        for spec in &schema.nodes {
+            let new_id = self.next_id;
+            self.next_id += 1;
+            id_map.insert(spec.id, new_id);
+            let kind = resolved_kinds.remove(&spec.id).unwrap();
+            self.nodes.insert(
+                new_id,
+                Node {
+                    id: new_id,
+                    kind,
+                    pos: Pos2::new(spec.x, spec.y),
+                },
+            );
+            inserted += 1;
+        }
+
+        for conn in &schema.connections {
+            if let (Some(&from_id), Some(&to_id)) =
+                (id_map.get(&conn.from_node), id_map.get(&conn.to_node))
+            {
+                self.connections.push(Connection {
+                    from: PinRef {
+                        node_id: from_id,
+                        kind: PinKind::Output,
+                        index: conn.from_index,
+                        is_exec: conn.from_exec,
+                    },
+                    to: PinRef {
+                        node_id: to_id,
+                        kind: PinKind::Input,
+                        index: conn.to_index,
+                        is_exec: conn.to_exec,
+                    },
+                });
+            }
+        }
+
+        self.pin_positions.clear();
+        self.status_message = format!(
+            "Imported AI graph: {} node(s), {} connection(s).",
+            inserted,
+            schema.connections.len()
+        );
+        Ok(inserted)
+    }
+
+    /// Convenience wrapper: reads a JSON `AiGraphSchema` from disk (e.g. the
+    /// output of an LLM prompt-to-graph pipeline) and imports it.
+    fn import_ai_graph_from_file(&mut self, path: &str) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status_message = format!("AI graph import failed: could not read {} ({})", path, e);
+                return;
+            }
+        };
+        let schema: AiGraphSchema = match serde_json::from_str(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status_message = format!("AI graph import failed: invalid JSON ({})", e);
+                return;
+            }
+        };
+        if let Err(errors) = self.import_ai_graph(&schema) {
+            let joined = errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.status_message = format!("AI graph import rejected: {}", joined);
+        }
+    }
 }
 
 fn pin_color(data_type: PinDataType) -> Color32 {
@@ -2363,42 +3232,118 @@ impl eframe::App for BlockoApp {
                             self.add_node(NodeKind::Return);
                         }
 
+                        section_header(ui, "Layout");
+                        if toolbox_button(ui, theme::ACCENT_FLOW, "🧭 Arrange Graph") {
+                            self.auto_arrange();
+                        }
+                        ui.label(
+                            egui::RichText::new("Untangles wires by dependency depth.")
+                                .size(10.5)
+                                .color(theme::TEXT_MUTED),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Space / Ctrl+K — quick search")
+                                .size(10.5)
+                                .color(theme::TEXT_MUTED),
+                        );
+
                         section_header(ui, "Project");
-                        if toolbox_button(ui, theme::ACCENT_PROJECT, "Save Project") {
+                        if toolbox_button(ui, theme::ACCENT_PROJECT, "Save Project (.json)") {
                             self.save_project();
                         }
-                        if toolbox_button(ui, theme::ACCENT_PROJECT, "Load Project") {
+                        if toolbox_button(ui, theme::ACCENT_PROJECT, "Load Project (.json)") {
                             self.load_project();
+                        }
+                        if toolbox_button(ui, theme::ACCENT_PROJECT, "💾 Save Project Package") {
+                            self.save_project_package();
+                        }
+                        if toolbox_button(ui, theme::ACCENT_PROJECT, "📂 Load Project Package") {
+                            self.load_project_package();
+                        }
+                        if toolbox_button(ui, theme::ACCENT_PROJECT, "🤖 Import AI Graph") {
+                            self.import_ai_graph_from_file("ai_graph.json");
                         }
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new(format!("File: {}", PROJECT_FILE))
+                            egui::RichText::new(format!("Legacy file: {}", PROJECT_FILE))
                                 .size(10.5)
                                 .color(theme::TEXT_MUTED),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Package dir: {}",
+                                self.project_dir.display()
+                            ))
+                            .size(10.5)
+                            .color(theme::TEXT_MUTED),
                         );
                     });
             });
 
+        // Stage 14: global keyboard shortcuts (Space / Ctrl+K) open quick search.
+        let quick_search_toggled = ctx.input(|i| {
+            i.key_pressed(egui::Key::Space) && !i.pointer.any_down()
+                || (i.modifiers.command && i.key_pressed(egui::Key::K))
+        });
+        if quick_search_toggled && !self.quick_search.open {
+            self.quick_search.open_at_cursor();
+            // Land new nodes roughly in the middle of the current viewport.
+            self.quick_search.spawn_at = Pos2::new(
+                self.camera.pan.x + 320.0 / self.camera.zoom,
+                self.camera.pan.y + 220.0 / self.camera.zoom,
+            );
+        } else if quick_search_toggled {
+            self.quick_search.close();
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let origin = ui.min_rect().min;
             let canvas_rect = ui.max_rect();
+            let z = self.camera.zoom;
 
             let painter = ui.painter();
             painter.rect_filled(canvas_rect, 0.0, Color32::BLACK);
 
-            let grid_spacing = 24.0;
+            // Grid is drawn in world space so it pans/zooms with the content.
+            let grid_spacing = 24.0 * z;
             let dot_color = Color32::from_gray(35);
-            let mut x = canvas_rect.left();
-            while x < canvas_rect.right() {
-                let mut y = canvas_rect.top();
-                while y < canvas_rect.bottom() {
-                    painter.circle_filled(Pos2::new(x, y), 1.0, dot_color);
-                    y += grid_spacing;
+            if grid_spacing > 3.0 {
+                let world_min = self.camera.screen_to_world(origin, canvas_rect.min);
+                let start_x = canvas_rect.left() - (world_min.x.rem_euclid(24.0)) * z;
+                let start_y = canvas_rect.top() - (world_min.y.rem_euclid(24.0)) * z;
+                let mut x = start_x;
+                while x < canvas_rect.right() {
+                    let mut y = start_y;
+                    while y < canvas_rect.bottom() {
+                        painter.circle_filled(Pos2::new(x, y), 1.0, dot_color);
+                        y += grid_spacing;
+                    }
+                    x += grid_spacing;
                 }
-                x += grid_spacing;
             }
 
-            ui.interact(canvas_rect, ui.id().with("canvas_bg"), Sense::click());
+            let bg_response = ui.interact(
+                canvas_rect,
+                ui.id().with("canvas_bg"),
+                Sense::click_and_drag(),
+            );
+
+            // Pan: middle-mouse, right-mouse, or plain left-drag on empty canvas.
+            if bg_response.dragged() {
+                self.camera.pan -= bg_response.drag_delta() / z;
+            }
+
+            // Zoom: mouse wheel, centered on the cursor.
+            if canvas_rect.contains(ctx.input(|i| i.pointer.hover_pos()).unwrap_or_default()) {
+                let scroll = ctx.input(|i| i.raw_scroll_delta.y);
+                if scroll.abs() > 0.0 {
+                    if let Some(hover) = ctx.input(|i| i.pointer.hover_pos()) {
+                        let factor = (scroll * 0.0015).exp();
+                        self.camera.zoom_at(origin, hover, factor);
+                    }
+                }
+            }
 
             for conn in &self.connections {
                 if let (Some(&from_pos), Some(&to_pos)) = (
@@ -2423,20 +3368,27 @@ impl eframe::App for BlockoApp {
 
             for node_id in node_ids {
                 let node = self.nodes.get_mut(&node_id).unwrap();
-                let height = BlockoApp::node_height(&node.kind);
-                let widget_extra = node.kind.widget_extra_height();
-                let screen_pos = origin + node.pos.to_vec2();
-                let node_rect = Rect::from_min_size(screen_pos, Vec2::new(NODE_WIDTH, height));
+                let height = BlockoApp::node_height(&node.kind) * z;
+                let widget_extra = node.kind.widget_extra_height() * z;
+                // Structural constants scaled to the current zoom level. The canvas
+                // pans/zooms as a real camera; node box, pins, and wires all track it.
+                let node_w = NODE_WIDTH * z;
+                let title_h = TITLE_HEIGHT * z;
+                let row_h = ROW_HEIGHT * z;
+                let body_pad = BODY_PADDING * z;
+                let pin_r = PIN_RADIUS * z;
+                let screen_pos = self.camera.world_to_screen(origin, node.pos);
+                let node_rect = Rect::from_min_size(screen_pos, Vec2::new(node_w, height));
                 let title_rect =
-                    Rect::from_min_size(screen_pos, Vec2::new(NODE_WIDTH, TITLE_HEIGHT));
+                    Rect::from_min_size(screen_pos, Vec2::new(node_w, title_h));
 
                 let painter = ui.painter();
                 painter.rect_filled(node_rect, 8.0, theme::BG_NODE);
                 painter.rect_filled(title_rect, 8.0, theme::BG_NODE_HEADER);
                 painter.rect_filled(
                     Rect::from_min_size(
-                        Pos2::new(node_rect.left(), node_rect.top() + TITLE_HEIGHT - 8.0),
-                        Vec2::new(NODE_WIDTH, 8.0),
+                        Pos2::new(node_rect.left(), node_rect.top() + title_h - 8.0),
+                        Vec2::new(node_w, 8.0),
                     ),
                     0.0,
                     theme::BG_NODE_HEADER,
@@ -2445,13 +3397,13 @@ impl eframe::App for BlockoApp {
                     Pos2::new(node_rect.left() + 12.0, title_rect.center().y),
                     Align2::LEFT_CENTER,
                     node.kind.title(),
-                    FontId::proportional(14.0),
+                    FontId::proportional(14.0 * z),
                     theme::TEXT_PRIMARY,
                 );
                 painter.line_segment(
                     [
-                        Pos2::new(node_rect.left(), node_rect.top() + TITLE_HEIGHT),
-                        Pos2::new(node_rect.right(), node_rect.top() + TITLE_HEIGHT),
+                        Pos2::new(node_rect.left(), node_rect.top() + title_h),
+                        Pos2::new(node_rect.right(), node_rect.top() + title_h),
                     ],
                     Stroke::new(1.0, theme::BORDER_SOFT),
                 );
@@ -2460,25 +3412,25 @@ impl eframe::App for BlockoApp {
                 let drag_id = ui.id().with(("node_drag", node_id));
                 let drag_response = ui.interact(title_rect, drag_id, Sense::click_and_drag());
                 if drag_response.dragged() {
-                    node.pos += drag_response.drag_delta();
+                    node.pos += drag_response.drag_delta() / z;
                 }
                 if drag_response.double_clicked() {
                     nodes_to_disconnect.push(node_id);
                 }
 
                 if let NodeKind::Compare(op) = &mut node.kind {
-                    let row_y = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 0.5;
+                    let row_y = screen_pos.y + title_h + row_h * 0.5;
                     let painter = ui.painter();
                     painter.text(
                         Pos2::new(node_rect.left() + 12.0, row_y),
                         Align2::LEFT_CENTER,
                         "Op",
-                        FontId::proportional(12.0),
+                        FontId::proportional(12.0 * z),
                         theme::TEXT_MUTED,
                     );
                     let combo_rect = Rect::from_min_size(
                         Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
-                        Vec2::new(NODE_WIDTH - 70.0, 18.0),
+                        Vec2::new(node_w - 70.0, 18.0),
                     );
                     ui.allocate_ui_at_rect(combo_rect, |ui| {
                         egui::ComboBox::from_id_source(("compare_op", node_id))
@@ -2497,68 +3449,68 @@ impl eframe::App for BlockoApp {
 
                 match &mut node.kind {
                     NodeKind::Number(value) => {
-                        let row_y = screen_pos.y + TITLE_HEIGHT + BODY_PADDING + ROW_HEIGHT * 0.5;
+                        let row_y = screen_pos.y + title_h + body_pad + row_h * 0.5;
                         let painter = ui.painter();
                         painter.text(
                             Pos2::new(node_rect.left() + 12.0, row_y),
                             Align2::LEFT_CENTER,
                             "Value",
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
                         let value_rect = Rect::from_min_size(
                             Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
-                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
+                            Vec2::new(node_w - 70.0, 18.0),
                         );
                         ui.put(value_rect, egui::DragValue::new(value).speed(0.1));
                     }
                     NodeKind::SetVariable(name) | NodeKind::GetVariable(name) => {
-                        let row_y = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 0.5;
+                        let row_y = screen_pos.y + title_h + row_h * 0.5;
                         let painter = ui.painter();
                         painter.text(
                             Pos2::new(node_rect.left() + 12.0, row_y),
                             Align2::LEFT_CENTER,
                             "Name",
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
                         let box_rect = Rect::from_min_size(
                             Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
-                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
+                            Vec2::new(node_w - 70.0, 18.0),
                         );
                         ui.put(box_rect, egui::TextEdit::singleline(name).hint_text("name"));
                     }
                     NodeKind::FunctionDef { name, params } => {
-                        let row_y1 = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 0.5;
+                        let row_y1 = screen_pos.y + title_h + row_h * 0.5;
                         let painter = ui.painter();
                         painter.text(
                             Pos2::new(node_rect.left() + 12.0, row_y1),
                             Align2::LEFT_CENTER,
                             "Name",
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
                         let name_rect = Rect::from_min_size(
                             Pos2::new(node_rect.left() + 58.0, row_y1 - 9.0),
-                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
+                            Vec2::new(node_w - 70.0, 18.0),
                         );
                         ui.put(
                             name_rect,
                             egui::TextEdit::singleline(name).hint_text("function name"),
                         );
 
-                        let row_y2 = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 1.5;
+                        let row_y2 = screen_pos.y + title_h + row_h * 1.5;
                         let painter = ui.painter();
                         painter.text(
                             Pos2::new(node_rect.left() + 12.0, row_y2),
                             Align2::LEFT_CENTER,
                             "Params",
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
                         let params_rect = Rect::from_min_size(
                             Pos2::new(node_rect.left() + 58.0, row_y2 - 9.0),
-                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
+                            Vec2::new(node_w - 70.0, 18.0),
                         );
                         ui.put(
                             params_rect,
@@ -2566,18 +3518,18 @@ impl eframe::App for BlockoApp {
                         );
                     }
                     NodeKind::FunctionCall { name } => {
-                        let row_y = screen_pos.y + TITLE_HEIGHT + ROW_HEIGHT * 0.5;
+                        let row_y = screen_pos.y + title_h + row_h * 0.5;
                         let painter = ui.painter();
                         painter.text(
                             Pos2::new(node_rect.left() + 12.0, row_y),
                             Align2::LEFT_CENTER,
                             "Name",
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
                         let name_rect = Rect::from_min_size(
                             Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
-                            Vec2::new(NODE_WIDTH - 70.0, 18.0),
+                            Vec2::new(node_w - 70.0, 18.0),
                         );
                         ui.put(
                             name_rect,
@@ -2593,11 +3545,11 @@ impl eframe::App for BlockoApp {
 
                 for row in 0..exec_rows {
                     let row_y = screen_pos.y
-                        + TITLE_HEIGHT
+                        + title_h
                         + widget_extra
-                        + BODY_PADDING
-                        + ROW_HEIGHT * row as f32
-                        + ROW_HEIGHT * 0.5;
+                        + body_pad
+                        + row_h * row as f32
+                        + row_h * 0.5;
 
                     if row < exec_in_labels.len() {
                         let pin_pos = Pos2::new(node_rect.left(), row_y);
@@ -2616,12 +3568,12 @@ impl eframe::App for BlockoApp {
                             pin_pos + Vec2::new(10.0, 0.0),
                             Align2::LEFT_CENTER,
                             exec_in_labels[row],
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
 
                         let pin_rect =
-                            Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
+                            Rect::from_center_size(pin_pos, Vec2::splat(pin_r * 3.0));
                         let pin_id = ui.id().with(("pin", node_id, "exec_in", row));
                         let pin_response = ui.interact(pin_rect, pin_id, Sense::click_and_drag());
 
@@ -2657,12 +3609,12 @@ impl eframe::App for BlockoApp {
                             pin_pos - Vec2::new(10.0, 0.0),
                             Align2::RIGHT_CENTER,
                             exec_out_labels[row],
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
 
                         let pin_rect =
-                            Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
+                            Rect::from_center_size(pin_pos, Vec2::splat(pin_r * 3.0));
                         let pin_id = ui.id().with(("pin", node_id, "exec_out", row));
                         let pin_response = ui.interact(pin_rect, pin_id, Sense::click_and_drag());
 
@@ -2681,13 +3633,13 @@ impl eframe::App for BlockoApp {
                 let output_types = node.kind.output_types();
                 let data_rows = input_labels.len().max(output_labels.len()).max(1);
                 let data_base_y = screen_pos.y
-                    + TITLE_HEIGHT
+                    + title_h
                     + widget_extra
-                    + BODY_PADDING
-                    + exec_rows as f32 * ROW_HEIGHT;
+                    + body_pad
+                    + exec_rows as f32 * row_h;
 
                 for row in 0..data_rows {
-                    let row_y = data_base_y + ROW_HEIGHT * row as f32 + ROW_HEIGHT * 0.5;
+                    let row_y = data_base_y + row_h * row as f32 + row_h * 0.5;
 
                     if row < input_labels.len() {
                         let pin_pos = Pos2::new(node_rect.left(), row_y);
@@ -2707,12 +3659,12 @@ impl eframe::App for BlockoApp {
                             pin_pos + Vec2::new(10.0, 0.0),
                             Align2::LEFT_CENTER,
                             input_labels[row],
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
 
                         let pin_rect =
-                            Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
+                            Rect::from_center_size(pin_pos, Vec2::splat(pin_r * 3.0));
                         let pin_id = ui.id().with(("pin", node_id, "in", row));
                         let pin_response = ui.interact(pin_rect, pin_id, Sense::click_and_drag());
 
@@ -2749,12 +3701,12 @@ impl eframe::App for BlockoApp {
                             pin_pos - Vec2::new(10.0, 0.0),
                             Align2::RIGHT_CENTER,
                             output_labels[row],
-                            FontId::proportional(12.0),
+                            FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
 
                         let pin_rect =
-                            Rect::from_center_size(pin_pos, Vec2::splat(PIN_RADIUS * 3.0));
+                            Rect::from_center_size(pin_pos, Vec2::splat(pin_r * 3.0));
                         let pin_id = ui.id().with(("pin", node_id, "out", row));
                         let pin_response = ui.interact(pin_rect, pin_id, Sense::click_and_drag());
 
@@ -2800,7 +3752,124 @@ impl eframe::App for BlockoApp {
             if cancel_drag {
                 self.dragging_connection = None;
             }
+
+            // Mini-map overlay (drawn last so it's always on top).
+            self.draw_minimap(ui, canvas_rect);
         });
+
+        // Stage 14: Universal Quick Search modal overlay.
+        self.show_quick_search_overlay(ctx);
+    }
+}
+
+impl BlockoApp {
+    /// World-space axis-aligned bounding box of every node, with a small margin.
+    /// Falls back to a sane default box around the origin when there are no nodes,
+    /// so the mini-map never divides by zero / collapses to a point.
+    fn world_bounds(&self) -> Rect {
+        if self.nodes.is_empty() {
+            return Rect::from_min_size(Pos2::new(-100.0, -100.0), Vec2::new(400.0, 300.0));
+        }
+
+        let mut min = Pos2::new(f32::MAX, f32::MAX);
+        let mut max = Pos2::new(f32::MIN, f32::MIN);
+
+        for node in self.nodes.values() {
+            let h = BlockoApp::node_height(&node.kind);
+            let node_min = node.pos;
+            let node_max = node.pos + Vec2::new(NODE_WIDTH, h);
+            min.x = min.x.min(node_min.x);
+            min.y = min.y.min(node_min.y);
+            max.x = max.x.max(node_max.x);
+            max.y = max.y.max(node_max.y);
+        }
+
+        let margin = 80.0;
+        Rect::from_min_max(min - Vec2::splat(margin), max + Vec2::splat(margin))
+    }
+
+    /// Renders the mini-map in the bottom-right corner of the canvas and handles
+    /// click-to-jump / click-and-drag navigation.
+    fn draw_minimap(&mut self, ui: &mut egui::Ui, canvas_rect: Rect) {
+        const MAP_SIZE: Vec2 = Vec2::new(220.0, 160.0);
+        const MAP_MARGIN: f32 = 16.0;
+
+        let map_rect = Rect::from_min_size(
+            canvas_rect.right_bottom() - MAP_SIZE - Vec2::splat(MAP_MARGIN),
+            MAP_SIZE,
+        );
+
+        // World bounds of all nodes, fitted into map_rect preserving aspect ratio.
+        let world_bounds = self.world_bounds();
+        let world_size = world_bounds.size().max(Vec2::splat(1.0));
+        let scale = (map_rect.width() / world_size.x).min(map_rect.height() / world_size.y);
+        let content_size = world_size * scale;
+        // Center the fitted content within the map rect (letterboxing).
+        let content_origin = map_rect.center() - content_size / 2.0;
+
+        let world_to_map = |p: Pos2| -> Pos2 {
+            content_origin + (p - world_bounds.min) * scale
+        };
+        let map_to_world = |p: Pos2| -> Pos2 {
+            world_bounds.min + (p - content_origin) / scale
+        };
+
+        let painter = ui.painter();
+
+        // Panel background.
+        painter.rect_filled(
+            map_rect.expand(6.0),
+            6.0,
+            Color32::from_rgba_unmultiplied(18, 18, 22, 235),
+        );
+        painter.rect_stroke(map_rect.expand(6.0), 6.0, Stroke::new(1.0, theme::BORDER));
+
+        // Node dots.
+        for node in self.nodes.values() {
+            let h = BlockoApp::node_height(&node.kind);
+            let node_world_rect =
+                Rect::from_min_size(node.pos, Vec2::new(NODE_WIDTH, h));
+            let a = world_to_map(node_world_rect.min);
+            let b = world_to_map(node_world_rect.max);
+            let r = Rect::from_two_pos(a, b);
+            painter.rect_filled(r, 2.0, Color32::from_rgb(90, 130, 220));
+        }
+
+        // Current viewport rectangle (semi-transparent overview box).
+        let visible = self
+            .camera
+            .visible_world_rect(canvas_rect.min, canvas_rect);
+        let viewport_a = world_to_map(visible.min);
+        let viewport_b = world_to_map(visible.max);
+        let viewport_rect = Rect::from_two_pos(viewport_a, viewport_b).intersect(map_rect.expand(6.0));
+        painter.rect_filled(
+            viewport_rect,
+            2.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 40),
+        );
+        painter.rect_stroke(viewport_rect, 2.0, Stroke::new(1.5, Color32::WHITE));
+
+        painter.text(
+            map_rect.left_top() + Vec2::new(6.0, -14.0),
+            Align2::LEFT_BOTTOM,
+            "Map",
+            FontId::proportional(11.0),
+            theme::TEXT_MUTED,
+        );
+
+        // Click-and-drag / click-to-jump navigation: any click or drag on the
+        // mini-map re-centers the camera on that point, and dragging keeps
+        // following the pointer for a smooth "steer the viewport" feel.
+        let map_id = ui.id().with("minimap_nav");
+        let response = ui.interact(map_rect, map_id, Sense::click_and_drag());
+        self.minimap_dragging = response.dragged();
+
+        if response.dragged() || response.clicked() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                let target_world = map_to_world(pointer);
+                self.camera.center_on(canvas_rect, target_world);
+            }
+        }
     }
 }
 
