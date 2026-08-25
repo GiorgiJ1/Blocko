@@ -1285,6 +1285,7 @@ struct ProjectFile {
 // controlled / partially loaded.
 // =======================================================================
 mod project {
+    #![allow(dead_code)] // list_assets/import_asset are foundation for a future asset browser UI
     use super::{Connection, NodeId, SerializableNode};
     use serde::{Deserialize, Serialize};
     use std::path::{Path, PathBuf};
@@ -1650,21 +1651,14 @@ impl BlockoApp {
             return;
         }
 
-        let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut parents: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for &id in &node_ids {
-            children.insert(id, Vec::new());
             parents.insert(id, Vec::new());
         }
         for conn in &self.connections {
             let (a, b) = (conn.from.node_id, conn.to.node_id);
             if a == b {
                 continue;
-            }
-            if let Some(v) = children.get_mut(&a) {
-                if !v.contains(&b) {
-                    v.push(b);
-                }
             }
             if let Some(v) = parents.get_mut(&b) {
                 if !v.contains(&a) {
@@ -1780,27 +1774,12 @@ impl BlockoApp {
         }
 
         let catalog = search_catalog();
-        let query_lower = self.quick_search.query.to_lowercase();
-        let mut matches: Vec<usize> = (0..catalog.len())
-            .filter(|&i| {
-                if query_lower.is_empty() {
-                    return true;
-                }
-                let entry = &catalog[i];
-                entry.label.to_lowercase().contains(&query_lower)
-                    || entry.category.to_lowercase().contains(&query_lower)
-                    || entry.keywords.contains(&query_lower)
-            })
-            .collect();
-        // Stable, readable ordering: category then label.
-        matches.sort_by_key(|&i| (catalog[i].category, catalog[i].label));
-
-        if self.quick_search.selected >= matches.len() {
-            self.quick_search.selected = matches.len().saturating_sub(1);
-        }
-
         let mut close_after = false;
         let mut spawn_choice: Option<usize> = None;
+        // Filled in inside the window closure (after the query TextEdit has
+        // run for this frame) so filtering reacts to what was just typed
+        // instead of lagging a frame behind.
+        let mut matches: Vec<usize> = Vec::new();
 
         egui::Window::new("quick_search")
             .title_bar(false)
@@ -1820,6 +1799,24 @@ impl BlockoApp {
                 });
                 ui.add_space(4.0);
                 ui.separator();
+
+                // Filter using this frame's freshly-edited query text.
+                let query_lower = self.quick_search.query.to_lowercase();
+                matches = (0..catalog.len())
+                    .filter(|&i| {
+                        if query_lower.is_empty() {
+                            return true;
+                        }
+                        let entry = &catalog[i];
+                        entry.label.to_lowercase().contains(query_lower.as_str())
+                            || entry.category.to_lowercase().contains(query_lower.as_str())
+                            || entry.keywords.contains(query_lower.as_str())
+                    })
+                    .collect();
+                matches.sort_by_key(|&i| (catalog[i].category, catalog[i].label));
+                if self.quick_search.selected >= matches.len() {
+                    self.quick_search.selected = matches.len().saturating_sub(1);
+                }
 
                 egui::ScrollArea::vertical()
                     .max_height(280.0)
@@ -3289,10 +3286,8 @@ impl eframe::App for BlockoApp {
         if quick_search_toggled && !self.quick_search.open {
             self.quick_search.open_at_cursor();
             // Land new nodes roughly in the middle of the current viewport.
-            self.quick_search.spawn_at = Pos2::new(
-                self.camera.pan.x + 320.0 / self.camera.zoom,
-                self.camera.pan.y + 220.0 / self.camera.zoom,
-            );
+            self.quick_search.spawn_at =
+                (self.camera.pan + Vec2::new(320.0, 220.0) / self.camera.zoom).to_pos2();
         } else if quick_search_toggled {
             self.quick_search.close();
         }
@@ -3323,15 +3318,23 @@ impl eframe::App for BlockoApp {
                 }
             }
 
-            let bg_response = ui.interact(
-                canvas_rect,
-                ui.id().with("canvas_bg"),
-                Sense::click_and_drag(),
-            );
+            ui.interact(canvas_rect, ui.id().with("canvas_bg"), Sense::click());
 
-            // Pan: middle-mouse, right-mouse, or plain left-drag on empty canvas.
-            if bg_response.dragged() {
-                self.camera.pan -= bg_response.drag_delta() / z;
+            // Pan: middle-mouse or right-mouse drag only. Left-drag is
+            // reserved for moving nodes. Read raw pointer state instead of
+            // a Response so this never competes with the per-node drag
+            // handles for ownership of the same overlapping canvas_rect.
+            let pan_button_down =
+                ctx.input(|i| i.pointer.middle_down() || i.pointer.secondary_down());
+            let pointer_over_canvas = ctx
+                .input(|i| i.pointer.hover_pos())
+                .map(|p| canvas_rect.contains(p))
+                .unwrap_or(false);
+            if pan_button_down && pointer_over_canvas {
+                let delta = ctx.input(|i| i.pointer.delta());
+                if delta != Vec2::ZERO {
+                    self.camera.pan -= delta / z;
+                }
             }
 
             // Zoom: mouse wheel, centered on the cursor.
@@ -3432,8 +3435,8 @@ impl eframe::App for BlockoApp {
                         Pos2::new(node_rect.left() + 58.0, row_y - 9.0),
                         Vec2::new(node_w - 70.0, 18.0),
                     );
-                    ui.allocate_ui_at_rect(combo_rect, |ui| {
-                        egui::ComboBox::from_id_source(("compare_op", node_id))
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(combo_rect), |ui| {
+                        egui::ComboBox::from_id_salt(("compare_op", node_id))
                             .selected_text(op.label())
                             .show_ui(ui, |ui| {
                                 for candidate in [
