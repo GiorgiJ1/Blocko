@@ -3,6 +3,7 @@ use egui::epaint::CubicBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 type NodeId = u64;
 type Counters = (usize, usize, usize, usize, usize, usize);
@@ -988,6 +989,230 @@ const PIN_RADIUS: f32 = 6.0;
 const PROJECT_FILE: &str = "blocko_project.json";
 const MAX_EXEC_STEPS: u32 = 20_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackMode {
+    Stopped,
+    Running,
+    Paused,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Frame {
+    Chain { current: Option<NodeId> },
+    WhileCheck { loop_node: NodeId },
+    Call { call_node: NodeId },
+}
+
+struct DebugVm {
+    frames: Vec<Frame>,
+    variables: HashMap<String, f32>,
+    call_cache: HashMap<NodeId, f32>,
+    functions: HashMap<String, (Vec<String>, Option<NodeId>)>,
+    console: Vec<String>,
+    steps: u32,
+    finished: bool,
+    current_node: Option<NodeId>,
+}
+
+impl DebugVm {
+    fn new(app: &BlockoApp) -> Self {
+        let functions = app.collect_functions();
+        let mut console = vec!["--- Debug session started ---".to_string()];
+        let mut finished = false;
+
+        let frames = match app.find_start_node().and_then(|s| app.find_exec_target(s, 0)) {
+            Some(first) => vec![Frame::Chain { current: Some(first) }],
+            None => {
+                console.push("Start node has no connected statements.".to_string());
+                finished = true;
+                Vec::new()
+            }
+        };
+
+        Self {
+            frames,
+            variables: HashMap::new(),
+            call_cache: HashMap::new(),
+            functions,
+            console,
+            steps: 0,
+            finished,
+            current_node: None,
+        }
+    }
+
+    fn set_current(&mut self, next: Option<NodeId>) {
+        if let Some(Frame::Chain { current }) = self.frames.last_mut() {
+            *current = next;
+        }
+    }
+
+    fn unwind_return(&mut self, value: f32) {
+        while let Some(frame) = self.frames.pop() {
+            if let Frame::Call { call_node } = frame {
+                self.call_cache.insert(call_node, value);
+                return;
+            }
+        }
+    }
+
+    fn exec_one(&mut self, app: &BlockoApp, node_id: NodeId) {
+        let node = match app.nodes.get(&node_id) {
+            Some(n) => n,
+            None => {
+                self.set_current(None);
+                return;
+            }
+        };
+
+        match &node.kind {
+            NodeKind::SetVariable(name) => {
+                let mut visiting = Vec::new();
+                let value = app
+                    .find_source_for_input(node_id, 0)
+                    .and_then(|src| {
+                        app.evaluate_output(src.node_id, &mut visiting, &self.variables, &self.call_cache)
+                    })
+                    .and_then(|v| v.as_number())
+                    .unwrap_or(0.0);
+                self.variables.insert(name.clone(), value);
+                let next = app.find_exec_target(node_id, 0);
+                self.set_current(next);
+            }
+            NodeKind::Print => {
+                let mut visiting = Vec::new();
+                match app.find_source_for_input(node_id, 0) {
+                    Some(src) => match app.evaluate_output(
+                        src.node_id,
+                        &mut visiting,
+                        &self.variables,
+                        &self.call_cache,
+                    ) {
+                        Some(value) => self.console.push(format!("Print[{}] -> {}", node_id, value)),
+                        None => self
+                            .console
+                            .push(format!("Print[{}] -> <could not evaluate input>", node_id)),
+                    },
+                    None => self.console.push(format!("Print[{}] -> <no input connected>", node_id)),
+                }
+                let next = app.find_exec_target(node_id, 0);
+                self.set_current(next);
+            }
+            NodeKind::WhileLoop => {
+                let resume = app.find_exec_target(node_id, 1);
+                self.set_current(resume);
+                self.frames.push(Frame::WhileCheck { loop_node: node_id });
+            }
+            NodeKind::FunctionCall { name } => {
+                let mut v_a = Vec::new();
+                let a0 = app
+                    .find_source_for_input(node_id, 0)
+                    .and_then(|s| app.evaluate_output(s.node_id, &mut v_a, &self.variables, &self.call_cache))
+                    .and_then(|v| v.as_number())
+                    .unwrap_or(0.0);
+                let mut v_b = Vec::new();
+                let a1 = app
+                    .find_source_for_input(node_id, 1)
+                    .and_then(|s| app.evaluate_output(s.node_id, &mut v_b, &self.variables, &self.call_cache))
+                    .and_then(|v| v.as_number())
+                    .unwrap_or(0.0);
+
+                let resume = app.find_exec_target(node_id, 0);
+                self.set_current(resume);
+
+                if let Some((params, body_start)) = self.functions.get(name).cloned() {
+                    if let Some(p) = params.get(0) {
+                        self.variables.insert(p.clone(), a0);
+                    }
+                    if let Some(p) = params.get(1) {
+                        self.variables.insert(p.clone(), a1);
+                    }
+                    self.frames.push(Frame::Call { call_node: node_id });
+                    self.frames.push(Frame::Chain { current: body_start });
+                } else {
+                    self.console.push(format!("Call to undefined function '{}'", name));
+                    self.call_cache.insert(node_id, 0.0);
+                }
+            }
+            NodeKind::Return => {
+                let mut visiting = Vec::new();
+                let value = app
+                    .find_source_for_input(node_id, 0)
+                    .and_then(|src| {
+                        app.evaluate_output(src.node_id, &mut visiting, &self.variables, &self.call_cache)
+                    })
+                    .and_then(|v| v.as_number())
+                    .unwrap_or(0.0);
+                self.unwind_return(value);
+            }
+            _ => self.set_current(None),
+        }
+    }
+
+    fn step(&mut self, app: &BlockoApp) -> Option<NodeId> {
+        if self.finished {
+            return None;
+        }
+
+        loop {
+            match self.frames.last() {
+                None => {
+                    self.finished = true;
+                    self.current_node = None;
+                    self.console.push("--- Program finished ---".to_string());
+                    return None;
+                }
+                Some(Frame::Chain { current: None }) => {
+                    self.frames.pop();
+                    if let Some(Frame::Call { call_node }) = self.frames.last().copied() {
+                        self.call_cache.insert(call_node, 0.0);
+                        self.frames.pop();
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        if self.steps >= MAX_EXEC_STEPS {
+            self.console
+                .push("... execution stopped: step limit reached (possible infinite loop) ...".to_string());
+            self.finished = true;
+            self.current_node = None;
+            return None;
+        }
+        self.steps += 1;
+
+        match self.frames.last().copied().unwrap() {
+            Frame::WhileCheck { loop_node } => {
+                let mut visiting = Vec::new();
+                let cond = app
+                    .find_source_for_input(loop_node, 0)
+                    .and_then(|src| {
+                        app.evaluate_output(src.node_id, &mut visiting, &self.variables, &self.call_cache)
+                    })
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                if cond {
+                    let body_start = app.find_exec_target(loop_node, 0);
+                    self.frames.push(Frame::Chain { current: body_start });
+                } else {
+                    self.frames.pop();
+                }
+                self.current_node = Some(loop_node);
+                Some(loop_node)
+            }
+            Frame::Chain { current: Some(node_id) } => {
+                self.exec_one(app, node_id);
+                self.current_node = Some(node_id);
+                Some(node_id)
+            }
+            Frame::Call { .. } => None,
+            Frame::Chain { current: None } => unreachable!(),
+        }
+    }
+}
+
 mod theme {
     use egui::Color32;
 
@@ -1597,6 +1822,14 @@ struct BlockoApp {
 
     // --- Stage 15: Project package system ---
     project_dir: std::path::PathBuf,
+
+    // --- Stage 16: Real Execution Debugger ---
+    debug_vm: Option<DebugVm>,
+    playback: PlaybackMode,
+    breakpoints: HashSet<NodeId>,
+    step_delay: Duration,
+    last_step_at: Instant,
+    show_variable_inspector: bool,
 }
 
 impl BlockoApp {
@@ -1614,7 +1847,45 @@ impl BlockoApp {
             minimap_dragging: false,
             quick_search: QuickSearchState::default(),
             project_dir: std::path::PathBuf::from("./MyBlockoProject"),
+            debug_vm: None,
+            playback: PlaybackMode::Stopped,
+            breakpoints: HashSet::new(),
+            step_delay: Duration::from_millis(400),
+            last_step_at: Instant::now(),
+            show_variable_inspector: true,
         }
+    }
+
+    fn debug_start(&mut self) {
+        self.debug_vm = Some(DebugVm::new(self));
+        self.playback = PlaybackMode::Running;
+        self.last_step_at = Instant::now();
+        self.status_message = "Debug: running.".to_string();
+    }
+
+    fn debug_step_once(&mut self) {
+        if self.debug_vm.is_none() {
+            self.debug_vm = Some(DebugVm::new(self));
+        }
+        if let Some(mut vm) = self.debug_vm.take() {
+            vm.step(self);
+            self.debug_vm = Some(vm);
+        }
+        self.playback = PlaybackMode::Paused;
+        self.status_message = "Debug: stepped.".to_string();
+    }
+
+    fn debug_pause(&mut self) {
+        if self.debug_vm.is_some() {
+            self.playback = PlaybackMode::Paused;
+            self.status_message = "Debug: paused.".to_string();
+        }
+    }
+
+    fn debug_restart(&mut self) {
+        self.debug_vm = None;
+        self.playback = PlaybackMode::Stopped;
+        self.status_message = "Debug: reset.".to_string();
     }
 
     fn add_node(&mut self, kind: NodeKind) {
@@ -2997,6 +3268,30 @@ fn pin_color(data_type: PinDataType) -> Color32 {
 
 impl eframe::App for BlockoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.playback == PlaybackMode::Running {
+            if self.last_step_at.elapsed() >= self.step_delay {
+                self.last_step_at = Instant::now();
+                if let Some(mut vm) = self.debug_vm.take() {
+                    let stepped_node = vm.step(self);
+                    let finished = vm.finished;
+                    self.debug_vm = Some(vm);
+
+                    if finished {
+                        self.playback = PlaybackMode::Stopped;
+                        self.status_message = "Debug: finished.".to_string();
+                    } else if let Some(node_id) = stepped_node {
+                        if self.breakpoints.contains(&node_id) {
+                            self.playback = PlaybackMode::Paused;
+                            self.status_message = format!("Debug: hit breakpoint at node {}.", node_id);
+                        }
+                    }
+                }
+            }
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.debug_vm.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(33));
+        }
+
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -3028,6 +3323,33 @@ impl eframe::App for BlockoApp {
                 if ui.button("Run Program").clicked() {
                     self.run_program();
                 }
+                ui.separator();
+                let play_enabled = self.playback != PlaybackMode::Running;
+                if ui.add_enabled(play_enabled, egui::Button::new("▶")).clicked() {
+                    match self.playback {
+                        PlaybackMode::Stopped => self.debug_start(),
+                        PlaybackMode::Paused => {
+                            self.playback = PlaybackMode::Running;
+                            self.last_step_at = Instant::now();
+                            self.status_message = "Debug: running.".to_string();
+                        }
+                        PlaybackMode::Running => {}
+                    }
+                }
+                if ui
+                    .add_enabled(self.playback == PlaybackMode::Running, egui::Button::new("⏸"))
+                    .clicked()
+                {
+                    self.debug_pause();
+                }
+                if ui.button("⏭").clicked() {
+                    self.debug_step_once();
+                }
+                if ui.button("⏮").clicked() {
+                    self.debug_restart();
+                }
+                ui.separator();
+                ui.toggle_value(&mut self.show_variable_inspector, "🔍 Variables");
                 ui.separator();
                 if ui.button("Export Source").clicked() {
                     self.export_code();
@@ -3292,6 +3614,67 @@ impl eframe::App for BlockoApp {
             self.quick_search.close();
         }
 
+        if self.show_variable_inspector {
+            egui::TopBottomPanel::bottom("variable_inspector")
+                .resizable(true)
+                .default_height(140.0)
+                .height_range(60.0..=320.0)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Variable Inspector")
+                                .color(theme::TEXT_PRIMARY)
+                                .strong(),
+                        );
+                        ui.separator();
+                        let status = match self.playback {
+                            PlaybackMode::Running => "● running",
+                            PlaybackMode::Paused => "❚❚ paused",
+                            PlaybackMode::Stopped => "○ stopped",
+                        };
+                        ui.label(egui::RichText::new(status).color(theme::TEXT_MUTED));
+                    });
+                    ui.add_space(4.0);
+                    ui.separator();
+
+                    egui::ScrollArea::vertical().show(ui, |ui| match &self.debug_vm {
+                        Some(vm) if !vm.variables.is_empty() => {
+                            egui::Grid::new("var_inspector_grid")
+                                .num_columns(2)
+                                .spacing([24.0, 6.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    let mut entries: Vec<(&String, &f32)> = vm.variables.iter().collect();
+                                    entries.sort_by(|a, b| a.0.cmp(b.0));
+                                    for (name, value) in entries {
+                                        ui.label(
+                                            egui::RichText::new(name.as_str())
+                                                .color(theme::ACCENT_NUMBERS)
+                                                .monospace(),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("{}", value))
+                                                .color(theme::TEXT_PRIMARY)
+                                                .monospace(),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                        Some(_) => {
+                            ui.label(egui::RichText::new("No variables set yet.").color(theme::TEXT_MUTED));
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new("Press ▶ or ⏭ to start a debug session.")
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        }
+                    });
+                });
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let origin = ui.min_rect().min;
             let canvas_rect = ui.max_rect();
@@ -3412,8 +3795,48 @@ impl eframe::App for BlockoApp {
                 );
                 painter.rect_stroke(node_rect, 8.0, Stroke::new(1.2, theme::BORDER));
 
+                let is_executing = self
+                    .debug_vm
+                    .as_ref()
+                    .and_then(|vm| vm.current_node)
+                    .map_or(false, |id| id == node_id);
+
+                if is_executing {
+                    let t = ui.input(|i| i.time) as f32;
+                    let pulse = (t * 4.0).sin() * 0.5 + 0.5;
+                    let glow_color = Color32::from_rgb(110, 220, 160);
+                    for (i, spread) in [(0, 2.0), (1, 5.0), (2, 9.0)] {
+                        let alpha = (140.0 * pulse * (1.0 - i as f32 * 0.28)) as u8;
+                        let stroke_color = Color32::from_rgba_unmultiplied(
+                            glow_color.r(),
+                            glow_color.g(),
+                            glow_color.b(),
+                            alpha,
+                        );
+                        painter.rect_stroke(
+                            node_rect.expand(spread * z),
+                            8.0 + spread * z,
+                            Stroke::new(2.0, stroke_color),
+                        );
+                    }
+                    painter.rect_stroke(node_rect, 8.0, Stroke::new(2.0, glow_color));
+                }
+
+                if self.breakpoints.contains(&node_id) {
+                    painter.circle_filled(
+                        node_rect.left_top() + Vec2::new(10.0 * z, 10.0 * z),
+                        4.0 * z,
+                        theme::CONSOLE_ERR,
+                    );
+                }
+
                 let drag_id = ui.id().with(("node_drag", node_id));
                 let drag_response = ui.interact(title_rect, drag_id, Sense::click_and_drag());
+                if drag_response.secondary_clicked() {
+                    if !self.breakpoints.remove(&node_id) {
+                        self.breakpoints.insert(node_id);
+                    }
+                }
                 if drag_response.dragged() {
                     node.pos += drag_response.drag_delta() / z;
                 }
