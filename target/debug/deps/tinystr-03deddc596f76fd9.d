@@ -1,0 +1,12 @@
+C:\Users\giogu\Downloads\Blocko-main\Blocko-main\target\debug\deps\tinystr-03deddc596f76fd9.d: C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\lib.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\macros.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\ascii.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\asciibyte.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\error.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\int_ops.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\unvalidated.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\ule.rs
+
+C:\Users\giogu\Downloads\Blocko-main\Blocko-main\target\debug\deps\libtinystr-03deddc596f76fd9.rmeta: C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\lib.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\macros.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\ascii.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\asciibyte.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\error.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\int_ops.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\unvalidated.rs C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\ule.rs
+
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\lib.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\macros.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\ascii.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\asciibyte.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\error.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\int_ops.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\unvalidated.rs:
+C:\Users\giogu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tinystr-0.8.4\src\ule.rs:
