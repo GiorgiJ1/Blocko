@@ -1012,6 +1012,8 @@ struct DebugVm {
     steps: u32,
     finished: bool,
     current_node: Option<NodeId>,
+    legacy_queue: Vec<NodeId>,
+    legacy_index: usize,
 }
 
 impl DebugVm {
@@ -1019,12 +1021,28 @@ impl DebugVm {
         let functions = app.collect_functions();
         let mut console = vec!["--- Debug session started ---".to_string()];
         let mut finished = false;
+        let mut legacy_queue: Vec<NodeId> = Vec::new();
 
         let frames = match app.find_start_node().and_then(|s| app.find_exec_target(s, 0)) {
             Some(first) => vec![Frame::Chain { current: Some(first) }],
             None => {
-                console.push("Start node has no connected statements.".to_string());
-                finished = true;
+                legacy_queue = app
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| matches!(n.kind, NodeKind::Print))
+                    .map(|(id, _)| *id)
+                    .collect();
+                legacy_queue.sort_unstable();
+
+                if legacy_queue.is_empty() {
+                    console.push("No Start node and no Print nodes on canvas.".to_string());
+                    finished = true;
+                } else {
+                    console.push(format!(
+                        "No Start node found — stepping through {} Print node(s).",
+                        legacy_queue.len()
+                    ));
+                }
                 Vec::new()
             }
         };
@@ -1038,6 +1056,8 @@ impl DebugVm {
             steps: 0,
             finished,
             current_node: None,
+            legacy_queue,
+            legacy_index: 0,
         }
     }
 
@@ -1152,6 +1172,35 @@ impl DebugVm {
     fn step(&mut self, app: &BlockoApp) -> Option<NodeId> {
         if self.finished {
             return None;
+        }
+
+        if !self.legacy_queue.is_empty() {
+            if self.legacy_index >= self.legacy_queue.len() {
+                self.finished = true;
+                self.current_node = None;
+                self.console.push("--- Program finished ---".to_string());
+                return None;
+            }
+            let print_id = self.legacy_queue[self.legacy_index];
+            self.legacy_index += 1;
+
+            let mut visiting = Vec::new();
+            match app.find_source_for_input(print_id, 0) {
+                Some(source) => match app.evaluate_output(
+                    source.node_id,
+                    &mut visiting,
+                    &self.variables,
+                    &self.call_cache,
+                ) {
+                    Some(value) => self.console.push(format!("Print[{}] -> {}", print_id, value)),
+                    None => self
+                        .console
+                        .push(format!("Print[{}] -> <could not evaluate input>", print_id)),
+                },
+                None => self.console.push(format!("Print[{}] -> <no input connected>", print_id)),
+            }
+            self.current_node = Some(print_id);
+            return Some(print_id);
         }
 
         loop {
