@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 type NodeId = u64;
+type GraphId = u64;
 type Counters = (usize, usize, usize, usize, usize, usize);
+const ROOT_GRAPH_ID: GraphId = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum CompareOp {
