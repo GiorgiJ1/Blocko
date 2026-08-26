@@ -3,12 +3,194 @@ use egui::epaint::CubicBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 type NodeId = u64;
 type GraphId = u64;
+type SemanticTypeId = u64;
+type PluginId = u64;
+type NodeTypeId = u64;
 type Counters = (usize, usize, usize, usize, usize, usize);
 const ROOT_GRAPH_ID: GraphId = 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum PluginPinType {
+    Number,
+    Bool,
+    Any,
+    Exec,
+    Semantic(SemanticTypeId),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PluginConfig {
+    values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PluginInstance {
+    plugin_id: PluginId,
+    node_type: NodeTypeId,
+    config: PluginConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+enum PluginRuntimeValue {
+    Number(f32),
+    Bool(bool),
+}
+
+impl PluginRuntimeValue {
+    fn as_number(&self) -> Option<f32> {
+        match self {
+            PluginRuntimeValue::Number(v) => Some(*v),
+            PluginRuntimeValue::Bool(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SemanticType {
+    id: SemanticTypeId,
+    name: &'static str,
+    color: (u8, u8, u8),
+}
+
+#[derive(Debug, Clone)]
+struct PluginDefinition {
+    title: &'static str,
+    data_inputs: Vec<(&'static str, PluginPinType)>,
+    data_outputs: Vec<(&'static str, PluginPinType)>,
+    exec_inputs: Vec<&'static str>,
+    exec_outputs: Vec<&'static str>,
+    fields: Vec<(&'static str, &'static str)>,
+}
+
+#[derive(Debug, Clone)]
+struct PluginCodeResult {
+    imports: Vec<String>,
+    lines: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PluginSimulationResult {
+    outputs: Vec<PluginRuntimeValue>,
+}
+
+#[derive(Debug, Clone)]
+struct PluginHandle {
+    def: PluginDefinition,
+}
+
+impl PluginHandle {
+    fn codegen(
+        &self,
+        _ctx: &CodeGenCtx,
+        _node_type: NodeTypeId,
+        _config: &PluginConfig,
+    ) -> Option<PluginCodeResult> {
+        Some(PluginCodeResult {
+            imports: Vec::new(),
+            lines: vec![format!("// {} plugin stub", self.def.title)],
+        })
+    }
+
+    fn simulate(
+        &self,
+        _ctx: &mut SimCtx,
+        _node_type: NodeTypeId,
+        _config: &PluginConfig,
+        inputs: &[PluginRuntimeValue],
+    ) -> PluginSimulationResult {
+        let outputs = if inputs.is_empty() {
+            vec![PluginRuntimeValue::Number(0.0)]
+        } else {
+            vec![inputs[0].clone()]
+        };
+        PluginSimulationResult { outputs }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PluginRegistry {
+    plugins: HashMap<PluginId, PluginHandle>,
+    semantic_types: HashMap<SemanticTypeId, SemanticType>,
+}
+
+impl PluginRegistry {
+    fn find(&self, plugin_id: PluginId) -> Option<&PluginHandle> {
+        self.plugins.get(&plugin_id)
+    }
+
+    fn semantic_type(&self, semantic_id: SemanticTypeId) -> Option<SemanticType> {
+        self.semantic_types.get(&semantic_id).copied()
+    }
+}
+
+static PLUGIN_REGISTRY: OnceLock<Arc<Mutex<PluginRegistry>>> = OnceLock::new();
+
+fn plugin_registry() -> Arc<Mutex<PluginRegistry>> {
+    PLUGIN_REGISTRY
+        .get_or_init(|| {
+            let mut registry = PluginRegistry::default();
+            registry.semantic_types.insert(
+                0,
+                SemanticType {
+                    id: 0,
+                    name: "Any",
+                    color: (180, 180, 180),
+                },
+            );
+            registry.plugins.insert(
+                0,
+                PluginHandle {
+                    def: PluginDefinition {
+                        title: "Plugin",
+                        data_inputs: vec![("Value", PluginPinType::Any)],
+                        data_outputs: vec![("Value", PluginPinType::Any)],
+                        exec_inputs: vec!["In"],
+                        exec_outputs: vec!["Out"],
+                        fields: vec![],
+                    },
+                },
+            );
+            Arc::new(Mutex::new(registry))
+        })
+        .clone()
+}
+
+fn plugin_def_for(inst: &PluginInstance) -> Option<PluginDefinition> {
+    plugin_registry()
+        .lock()
+        .unwrap()
+        .find(inst.plugin_id)
+        .map(|plugin| plugin.def.clone())
+}
+
+fn plugin_pin_type_to_data_type(pin_type: PluginPinType) -> PinDataType {
+    match pin_type {
+        PluginPinType::Number => PinDataType::Number,
+        PluginPinType::Bool => PinDataType::Bool,
+        PluginPinType::Any => PinDataType::Any,
+        PluginPinType::Exec => PinDataType::Exec,
+        PluginPinType::Semantic(id) => PinDataType::Semantic(id),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CodeGenCtx<'a> {
+    lang: TargetLanguage,
+    indent: &'a str,
+    input_vars: &'a [String],
+    output_vars: &'a [String],
+}
+
+#[derive(Debug)]
+struct SimCtx<'a> {
+    console: &'a mut Vec<String>,
+    step: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum CompareOp {
@@ -63,14 +245,42 @@ enum NodeKind {
     FunctionDef { name: String, params: String },
     FunctionCall { name: String },
     Return,
+
+    // --- Stage 17: Sub-graphs & reusable functions ---
+    // Denormalized: each variant carries its own resolved pin layout so the
+    // existing static NodeKind::title()/input_labels()/etc. dispatch keeps
+    // working with zero app-context lookups, same as every other node kind.
+    GroupNode {
+        graph_id: GraphId,
+        name: String,
+        exec_in: Vec<String>,
+        exec_out: Vec<String>,
+        data_in: Vec<(String, PinDataType)>,
+        data_out: Vec<(String, PinDataType)>,
+    },
+    GroupInput {
+        slot: usize,
+        label: String,
+        is_exec: bool,
+        data_type: PinDataType,
+    },
+    GroupOutput {
+        slot: usize,
+        label: String,
+        is_exec: bool,
+        data_type: PinDataType,
+    },
+
+    Plugin(PluginInstance),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum PinDataType {
     Number,
     Bool,
     Any,
     Exec,
+    Semantic(SemanticTypeId),
 }
 
 impl NodeKind {
@@ -94,6 +304,21 @@ impl NodeKind {
             NodeKind::FunctionDef { .. } => "Function Def",
             NodeKind::FunctionCall { .. } => "Call Function",
             NodeKind::Return => "Return",
+            NodeKind::GroupNode { .. } => "Group",
+            NodeKind::GroupInput { .. } => "Input",
+            NodeKind::GroupOutput { .. } => "Output",
+            NodeKind::Plugin(inst) => plugin_def_for(inst)
+                .map(|d| d.title)
+                .unwrap_or("Unknown Plugin Node"),
+        }
+    }
+
+    /// Real display text for dynamically-named nodes (Group instances and
+    /// their boundary pins). Falls back to `title()` for every static kind.
+    fn title_owned(&self) -> String {
+        match self {
+            NodeKind::GroupNode { name, .. } => name.clone(),
+            _ => self.title().to_string(),
         }
     }
 
@@ -113,6 +338,18 @@ impl NodeKind {
             NodeKind::FunctionDef { .. } => vec![],
             NodeKind::FunctionCall { .. } => vec!["Arg1", "Arg2"],
             NodeKind::Return => vec!["Value"],
+            NodeKind::GroupNode { data_in, .. } => vec![""; data_in.len()],
+            NodeKind::GroupInput { .. } => vec![],
+            NodeKind::GroupOutput { is_exec, .. } => {
+                if *is_exec {
+                    vec![]
+                } else {
+                    vec!["Value"]
+                }
+            }
+            NodeKind::Plugin(inst) => plugin_def_for(inst)
+                .map(|d| d.data_inputs.iter().map(|(l, _)| *l).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -131,6 +368,18 @@ impl NodeKind {
             NodeKind::FunctionDef { .. } => vec![],
             NodeKind::FunctionCall { .. } => vec!["Result"],
             NodeKind::Return => vec![],
+            NodeKind::GroupNode { data_out, .. } => vec![""; data_out.len()],
+            NodeKind::GroupInput { is_exec, .. } => {
+                if *is_exec {
+                    vec![]
+                } else {
+                    vec!["Value"]
+                }
+            }
+            NodeKind::GroupOutput { .. } => vec![],
+            NodeKind::Plugin(inst) => plugin_def_for(inst)
+                .map(|d| d.data_outputs.iter().map(|(l, _)| *l).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -152,6 +401,18 @@ impl NodeKind {
             NodeKind::FunctionDef { .. } => vec![],
             NodeKind::FunctionCall { .. } => vec![PinDataType::Number, PinDataType::Number],
             NodeKind::Return => vec![PinDataType::Number],
+            NodeKind::GroupNode { data_in, .. } => data_in.iter().map(|(_, t)| *t).collect(),
+            NodeKind::GroupInput { .. } => vec![],
+            NodeKind::GroupOutput { is_exec, data_type, .. } => {
+                if *is_exec {
+                    vec![]
+                } else {
+                    vec![*data_type]
+                }
+            }
+            NodeKind::Plugin(inst) => plugin_def_for(inst)
+                .map(|d| d.data_inputs.iter().map(|(_, t)| plugin_pin_type_to_data_type(*t)).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -172,6 +433,18 @@ impl NodeKind {
             NodeKind::FunctionDef { .. } => vec![],
             NodeKind::FunctionCall { .. } => vec![PinDataType::Number],
             NodeKind::Return => vec![],
+            NodeKind::GroupNode { data_out, .. } => data_out.iter().map(|(_, t)| *t).collect(),
+            NodeKind::GroupInput { is_exec, data_type, .. } => {
+                if *is_exec {
+                    vec![]
+                } else {
+                    vec![*data_type]
+                }
+            }
+            NodeKind::GroupOutput { .. } => vec![],
+            NodeKind::Plugin(inst) => plugin_def_for(inst)
+                .map(|d| d.data_outputs.iter().map(|(_, t)| plugin_pin_type_to_data_type(*t)).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -182,6 +455,9 @@ impl NodeKind {
             NodeKind::WhileLoop => vec!["In"],
             NodeKind::FunctionCall { .. } => vec!["In"],
             NodeKind::Return => vec!["In"],
+            NodeKind::GroupNode { exec_in, .. } => vec![""; exec_in.len()],
+            NodeKind::GroupOutput { is_exec, .. } if *is_exec => vec!["In"],
+            NodeKind::Plugin(inst) => plugin_def_for(inst).map(|d| d.exec_inputs).unwrap_or_default(),
             _ => vec![],
         }
     }
@@ -194,6 +470,9 @@ impl NodeKind {
             NodeKind::WhileLoop => vec!["Body", "After"],
             NodeKind::FunctionDef { .. } => vec!["Body"],
             NodeKind::FunctionCall { .. } => vec!["Out"],
+            NodeKind::GroupNode { exec_out, .. } => vec![""; exec_out.len()],
+            NodeKind::GroupInput { is_exec, .. } if *is_exec => vec!["Out"],
+            NodeKind::Plugin(inst) => plugin_def_for(inst).map(|d| d.exec_outputs).unwrap_or_default(),
             _ => vec![],
         }
     }
@@ -204,8 +483,51 @@ impl NodeKind {
             NodeKind::SetVariable(_) | NodeKind::GetVariable(_) => ROW_HEIGHT,
             NodeKind::FunctionDef { .. } => ROW_HEIGHT * 2.0,
             NodeKind::FunctionCall { .. } => ROW_HEIGHT,
+            NodeKind::Plugin(inst) => plugin_def_for(inst)
+                .map(|d| d.fields.len() as f32 * ROW_HEIGHT)
+                .unwrap_or(0.0),
             _ => 0.0,
         }
+    }
+
+    /// Real label text for nodes whose pin labels are dynamic (Stage 17
+    /// group/boundary nodes). Every other kind falls through to the static
+    /// `&'static str` accessor above, just owned.
+    fn exec_input_labels_owned(&self) -> Vec<String> {
+        if let NodeKind::GroupNode { exec_in, .. } = self {
+            return exec_in.clone();
+        }
+        self.exec_input_labels().into_iter().map(|s| s.to_string()).collect()
+    }
+
+    fn exec_output_labels_owned(&self) -> Vec<String> {
+        if let NodeKind::GroupNode { exec_out, .. } = self {
+            return exec_out.clone();
+        }
+        if let NodeKind::GroupInput { is_exec: true, label, .. } = self {
+            return vec![label.clone()];
+        }
+        self.exec_output_labels().into_iter().map(|s| s.to_string()).collect()
+    }
+
+    fn input_labels_owned(&self) -> Vec<String> {
+        if let NodeKind::GroupNode { data_in, .. } = self {
+            return data_in.iter().map(|(l, _)| l.clone()).collect();
+        }
+        if let NodeKind::GroupOutput { is_exec: false, label, .. } = self {
+            return vec![label.clone()];
+        }
+        self.input_labels().into_iter().map(|s| s.to_string()).collect()
+    }
+
+    fn output_labels_owned(&self) -> Vec<String> {
+        if let NodeKind::GroupNode { data_out, .. } = self {
+            return data_out.iter().map(|(l, _)| l.clone()).collect();
+        }
+        if let NodeKind::GroupInput { is_exec: false, label, .. } = self {
+            return vec![label.clone()];
+        }
+        self.output_labels().into_iter().map(|s| s.to_string()).collect()
     }
 }
 
@@ -248,6 +570,28 @@ struct Connection {
 struct DraggingConnection {
     from: PinRef,
     current_pos: Pos2,
+}
+
+// ---------------------------------------------------------------------
+// Stage 17: Sub-graphs & reusable functions.
+// A graph body (nodes + connections) can be "parked" while not the one
+// currently open for editing; `BlockoApp::nodes`/`connections` always hold
+// whichever graph is active, swapped in and out of `BlockoApp::subgraphs`
+// as the user navigates the breadcrumb trail. Metadata (name/kind/boundary
+// pins) is kept separately so it stays available even for the graph that's
+// currently swapped in (see `BlockoApp::enter_subgraph`).
+// ---------------------------------------------------------------------
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+enum GraphKind {
+    Group,
+    Function,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BoundaryPin {
+    label: String,
+    is_exec: bool,
+    data_type: PinDataType,
 }
 
 // ---------------------------------------------------------------------
@@ -315,6 +659,22 @@ struct SearchEntry {
     category: &'static str,
     keywords: &'static str,
     factory: fn() -> NodeKind,
+}
+
+/// Stage 17: a Quick Search row that can spawn either a static node kind
+/// or a call-instance of a registered custom function. Built fresh each
+/// time the search opens/filters so newly-created functions show up
+/// immediately without any separate registration step.
+enum SearchSpawn {
+    Static(fn() -> NodeKind),
+    Function(GraphId),
+}
+
+struct SearchRow {
+    label: String,
+    category: &'static str,
+    keywords: String,
+    spawn: SearchSpawn,
 }
 
 fn search_catalog() -> Vec<SearchEntry> {
@@ -458,6 +818,13 @@ enum IRStmt {
         args: Vec<String>,
     },
     Return(String),
+    PluginCall {
+        plugin_id: PluginId,
+        node_type: NodeTypeId,
+        config: PluginConfig,
+        arg_vars: Vec<String>,
+        out_vars: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -550,6 +917,22 @@ fn emit_python_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>) {
                 args.join(", ")
             )),
             IRStmt::Return(v) => lines.push(format!("{}return {}", pad, v)),
+            IRStmt::PluginCall { plugin_id, node_type, config, arg_vars, out_vars } => {
+                if let Some(plugin) = plugin_registry().lock().unwrap().find(*plugin_id) {
+                    let gen_ctx = CodeGenCtx {
+                        lang: TargetLanguage::Python,
+                        indent: &pad,
+                        input_vars: arg_vars.as_slice(),
+                        output_vars: out_vars.as_slice(),
+                    };
+                    if let Some(result) = plugin.codegen(&gen_ctx, *node_type, config) {
+                        for imp in &result.imports {
+                            lines.push(format!("{}{}", pad, imp));
+                        }
+                        lines.extend(result.lines);
+                    }
+                }
+            }
             IRStmt::While {
                 cond_lines,
                 cond_var,
@@ -670,6 +1053,22 @@ fn emit_rust_stmts(
                 args.join(", ")
             )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
+            IRStmt::PluginCall { plugin_id, node_type, config, arg_vars, out_vars } => {
+                if let Some(plugin) = plugin_registry().lock().unwrap().find(*plugin_id) {
+                    let gen_ctx = CodeGenCtx {
+                        lang: TargetLanguage::Rust,
+                        indent: &pad,
+                        input_vars: arg_vars.as_slice(),
+                        output_vars: out_vars.as_slice(),
+                    };
+                    if let Some(result) = plugin.codegen(&gen_ctx, *node_type, config) {
+                        for imp in &result.imports {
+                            lines.push(format!("{}{}", pad, imp));
+                        }
+                        lines.extend(result.lines);
+                    }
+                }
+            }
             IRStmt::While {
                 cond_lines,
                 cond_var,
@@ -803,6 +1202,22 @@ fn emit_js_stmts(
                 args.join(", ")
             )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
+            IRStmt::PluginCall { plugin_id, node_type, config, arg_vars, out_vars } => {
+                if let Some(plugin) = plugin_registry().lock().unwrap().find(*plugin_id) {
+                    let gen_ctx = CodeGenCtx {
+                        lang: TargetLanguage::JavaScript,
+                        indent: &pad,
+                        input_vars: arg_vars.as_slice(),
+                        output_vars: out_vars.as_slice(),
+                    };
+                    if let Some(result) = plugin.codegen(&gen_ctx, *node_type, config) {
+                        for imp in &result.imports {
+                            lines.push(format!("{}{}", pad, imp));
+                        }
+                        lines.extend(result.lines);
+                    }
+                }
+            }
             IRStmt::While {
                 cond_lines,
                 cond_var,
@@ -925,6 +1340,22 @@ fn emit_cpp_stmts(
                 args.join(", ")
             )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
+            IRStmt::PluginCall { plugin_id, node_type, config, arg_vars, out_vars } => {
+                if let Some(plugin) = plugin_registry().lock().unwrap().find(*plugin_id) {
+                    let gen_ctx = CodeGenCtx {
+                        lang: TargetLanguage::Cpp,
+                        indent: &pad,
+                        input_vars: arg_vars.as_slice(),
+                        output_vars: out_vars.as_slice(),
+                    };
+                    if let Some(result) = plugin.codegen(&gen_ctx, *node_type, config) {
+                        for imp in &result.imports {
+                            lines.push(format!("{}{}", pad, imp));
+                        }
+                        lines.extend(result.lines);
+                    }
+                }
+            }
             IRStmt::While {
                 cond_lines,
                 cond_var,
@@ -1166,6 +1597,20 @@ impl DebugVm {
                     .and_then(|v| v.as_number())
                     .unwrap_or(0.0);
                 self.unwind_return(value);
+            }
+            NodeKind::Plugin(inst) => {
+                if let Some(plugin) = plugin_registry().lock().unwrap().find(inst.plugin_id) {
+                    let inputs = app.collect_plugin_inputs(node_id, inst, &self.variables, &self.call_cache);
+                    let mut sim_ctx = SimCtx { console: &mut self.console, step: self.steps };
+                    let result = plugin.simulate(&mut sim_ctx, inst.node_type, &inst.config, &inputs);
+                    if let Some(first) = result.outputs.first() {
+                        self.call_cache.insert(node_id, first.as_number().unwrap_or(0.0));
+                    }
+                } else {
+                    self.console.push(format!("missing plugin: {}", inst.plugin_id));
+                }
+                let next = app.find_exec_target(node_id, 0);
+                self.set_current(next);
             }
             _ => self.set_current(None),
         }
@@ -1881,6 +2326,19 @@ struct BlockoApp {
     step_delay: Duration,
     last_step_at: Instant,
     show_variable_inspector: bool,
+
+    // --- Stage 17: Sub-graphs & reusable functions ---
+    subgraphs: HashMap<GraphId, (HashMap<NodeId, Node>, Vec<Connection>)>,
+    graph_names: HashMap<GraphId, String>,
+    graph_kinds: HashMap<GraphId, GraphKind>,
+    graph_boundary: HashMap<GraphId, (Vec<BoundaryPin>, Vec<BoundaryPin>)>,
+    graph_stack: Vec<GraphId>,
+    next_graph_id: GraphId,
+    selection: HashSet<NodeId>,
+    show_group_prompt: bool,
+    group_prompt_text: String,
+    show_new_function_prompt: bool,
+    new_function_prompt_text: String,
 }
 
 impl BlockoApp {
@@ -1904,6 +2362,17 @@ impl BlockoApp {
             step_delay: Duration::from_millis(400),
             last_step_at: Instant::now(),
             show_variable_inspector: true,
+            subgraphs: HashMap::new(),
+            graph_names: HashMap::from([(ROOT_GRAPH_ID, "Main".to_string())]),
+            graph_kinds: HashMap::new(),
+            graph_boundary: HashMap::new(),
+            graph_stack: vec![ROOT_GRAPH_ID],
+            next_graph_id: ROOT_GRAPH_ID + 1,
+            selection: HashSet::new(),
+            show_group_prompt: false,
+            group_prompt_text: "New Group".to_string(),
+            show_new_function_prompt: false,
+            new_function_prompt_text: "my_function".to_string(),
         }
     }
 
@@ -1937,6 +2406,351 @@ impl BlockoApp {
         self.debug_vm = None;
         self.playback = PlaybackMode::Stopped;
         self.status_message = "Debug: reset.".to_string();
+    }
+
+    // --- Stage 17: Sub-graphs & reusable functions ---
+
+    fn active_graph_id(&self) -> GraphId {
+        *self.graph_stack.last().unwrap_or(&ROOT_GRAPH_ID)
+    }
+
+    fn pin_data_type(&self, nodes: &HashMap<NodeId, Node>, pin: PinRef) -> PinDataType {
+        if let Some(node) = nodes.get(&pin.node_id) {
+            let types = if pin.kind == PinKind::Output {
+                node.kind.output_types()
+            } else {
+                node.kind.input_types()
+            };
+            types.get(pin.index).copied().unwrap_or(PinDataType::Any)
+        } else {
+            PinDataType::Any
+        }
+    }
+
+    /// Swaps the currently-open graph out into `subgraphs` and swaps
+    /// `target` in as the new active `nodes`/`connections`. All existing
+    /// editor/canvas code keeps working unmodified — it always operates on
+    /// "whichever graph is currently open".
+    fn enter_subgraph(&mut self, target: GraphId) {
+        let current_id = self.active_graph_id();
+        let parked_nodes = std::mem::take(&mut self.nodes);
+        let parked_conns = std::mem::take(&mut self.connections);
+        self.subgraphs.insert(current_id, (parked_nodes, parked_conns));
+
+        let (n, c) = self.subgraphs.remove(&target).unwrap_or_default();
+        self.nodes = n;
+        self.connections = c;
+        self.pin_positions.clear();
+        self.selection.clear();
+        self.graph_stack.push(target);
+        let name = self.graph_names.get(&target).cloned().unwrap_or_default();
+        self.status_message = format!("Entered '{}'.", name);
+    }
+
+    /// Breadcrumb navigation: `index` is a position in `graph_stack`. Only
+    /// ever moves back toward the root, which is all a breadcrumb needs.
+    fn navigate_to_breadcrumb(&mut self, index: usize) {
+        while self.graph_stack.len() > index + 1 {
+            let popped_target = self.graph_stack[self.graph_stack.len() - 2];
+            let current_id = *self.graph_stack.last().unwrap();
+            let parked_nodes = std::mem::take(&mut self.nodes);
+            let parked_conns = std::mem::take(&mut self.connections);
+            self.subgraphs.insert(current_id, (parked_nodes, parked_conns));
+
+            let (n, c) = self.subgraphs.remove(&popped_target).unwrap_or_default();
+            self.nodes = n;
+            self.connections = c;
+            self.graph_stack.pop();
+        }
+        self.pin_positions.clear();
+        self.selection.clear();
+    }
+
+    /// Toggles `node_id` in the multi-select set. `additive` (Ctrl/Shift
+    /// held) adds/removes without disturbing the rest of the selection;
+    /// otherwise the click replaces the selection with just this node.
+    fn toggle_selection(&mut self, node_id: NodeId, additive: bool) {
+        if additive {
+            if !self.selection.remove(&node_id) {
+                self.selection.insert(node_id);
+            }
+        } else {
+            self.selection.clear();
+            self.selection.insert(node_id);
+        }
+    }
+
+    /// Encapsulates the current selection into a new collapsible group:
+    /// any connection crossing the selection boundary becomes one
+    /// GroupInput/GroupOutput interface pin, and the selected nodes are
+    /// replaced in the currently-open graph by a single GroupNode.
+    fn group_selected_nodes(&mut self, title: String) {
+        if self.selection.len() < 2 {
+            self.status_message = "Select at least two nodes to group (Ctrl/Shift+click).".to_string();
+            return;
+        }
+        let selection = self.selection.clone();
+
+        struct Crossing {
+            external: PinRef,
+            internal: PinRef,
+            into_selection: bool,
+        }
+        let mut crossings: Vec<Crossing> = Vec::new();
+        let mut internal_conns: Vec<Connection> = Vec::new();
+        let mut remaining_conns: Vec<Connection> = Vec::new();
+
+        for conn in self.connections.drain(..) {
+            let from_in = selection.contains(&conn.from.node_id);
+            let to_in = selection.contains(&conn.to.node_id);
+            match (from_in, to_in) {
+                (true, true) => internal_conns.push(conn),
+                (false, true) => crossings.push(Crossing {
+                    external: conn.from,
+                    internal: conn.to,
+                    into_selection: true,
+                }),
+                (true, false) => crossings.push(Crossing {
+                    external: conn.to,
+                    internal: conn.from,
+                    into_selection: false,
+                }),
+                (false, false) => remaining_conns.push(conn),
+            }
+        }
+        self.connections = remaining_conns;
+
+        let mut inner_nodes: HashMap<NodeId, Node> = HashMap::new();
+        for id in &selection {
+            if let Some(node) = self.nodes.remove(id) {
+                inner_nodes.insert(*id, node);
+            }
+        }
+
+        let mut inputs: Vec<BoundaryPin> = Vec::new();
+        let mut outputs: Vec<BoundaryPin> = Vec::new();
+        let mut group_reconnect: Vec<Connection> = Vec::new();
+        let mut exec_in_idx = 0usize;
+        let mut data_in_idx = 0usize;
+        let mut exec_out_idx = 0usize;
+        let mut data_out_idx = 0usize;
+
+        let group_id = self.next_id;
+        self.next_id += 1;
+
+        for crossing in &crossings {
+            let is_exec = crossing.internal.is_exec;
+            let data_type = self.pin_data_type(&inner_nodes, crossing.internal);
+
+            if crossing.into_selection {
+                let local_index = if is_exec {
+                    let i = exec_in_idx;
+                    exec_in_idx += 1;
+                    i
+                } else {
+                    let i = data_in_idx;
+                    data_in_idx += 1;
+                    i
+                };
+                let label = format!("{}{}", if is_exec { "Exec" } else { "In" }, local_index + 1);
+                inputs.push(BoundaryPin { label: label.clone(), is_exec, data_type });
+
+                let iface_id = self.next_id;
+                self.next_id += 1;
+                inner_nodes.insert(iface_id, Node {
+                    id: iface_id,
+                    kind: NodeKind::GroupInput { slot: local_index, label: label.clone(), is_exec, data_type },
+                    pos: Pos2::new(-160.0, local_index as f32 * 70.0),
+                });
+                internal_conns.push(Connection {
+                    from: PinRef { node_id: iface_id, kind: PinKind::Output, index: 0, is_exec },
+                    to: crossing.internal,
+                });
+                group_reconnect.push(Connection {
+                    from: crossing.external,
+                    to: PinRef { node_id: group_id, kind: PinKind::Input, index: local_index, is_exec },
+                });
+            } else {
+                let local_index = if is_exec {
+                    let i = exec_out_idx;
+                    exec_out_idx += 1;
+                    i
+                } else {
+                    let i = data_out_idx;
+                    data_out_idx += 1;
+                    i
+                };
+                let label = format!("{}{}", if is_exec { "Exec" } else { "Out" }, local_index + 1);
+                outputs.push(BoundaryPin { label: label.clone(), is_exec, data_type });
+
+                let iface_id = self.next_id;
+                self.next_id += 1;
+                inner_nodes.insert(iface_id, Node {
+                    id: iface_id,
+                    kind: NodeKind::GroupOutput { slot: local_index, label: label.clone(), is_exec, data_type },
+                    pos: Pos2::new(320.0, local_index as f32 * 70.0),
+                });
+                internal_conns.push(Connection {
+                    from: crossing.internal,
+                    to: PinRef { node_id: iface_id, kind: PinKind::Input, index: 0, is_exec },
+                });
+                group_reconnect.push(Connection {
+                    from: PinRef { node_id: group_id, kind: PinKind::Output, index: local_index, is_exec },
+                    to: crossing.external,
+                });
+            }
+        }
+
+        let avg_pos = {
+            let sum: Vec2 = inner_nodes
+                .values()
+                .map(|n| n.pos.to_vec2())
+                .fold(Vec2::ZERO, |a, b| a + b);
+            (sum / inner_nodes.len().max(1) as f32).to_pos2()
+        };
+
+        let new_graph_id = self.next_graph_id;
+        self.next_graph_id += 1;
+        self.subgraphs.insert(new_graph_id, (inner_nodes, internal_conns));
+        self.graph_names.insert(new_graph_id, title.clone());
+        self.graph_kinds.insert(new_graph_id, GraphKind::Group);
+        self.graph_boundary.insert(new_graph_id, (inputs.clone(), outputs.clone()));
+
+        self.nodes.insert(group_id, Node {
+            id: group_id,
+            kind: NodeKind::GroupNode {
+                graph_id: new_graph_id,
+                name: title.clone(),
+                exec_in: inputs.iter().filter(|p| p.is_exec).map(|p| p.label.clone()).collect(),
+                exec_out: outputs.iter().filter(|p| p.is_exec).map(|p| p.label.clone()).collect(),
+                data_in: inputs
+                    .iter()
+                    .filter(|p| !p.is_exec)
+                    .map(|p| (p.label.clone(), p.data_type))
+                    .collect(),
+                data_out: outputs
+                    .iter()
+                    .filter(|p| !p.is_exec)
+                    .map(|p| (p.label.clone(), p.data_type))
+                    .collect(),
+            },
+            pos: avg_pos,
+        });
+        self.connections.extend(group_reconnect);
+
+        let count = selection.len();
+        self.selection.clear();
+        self.status_message = format!("Grouped {} node(s) into '{}'.", count, title);
+    }
+
+    /// Creates a new empty Function-kind sub-graph, registers it (so it
+    /// immediately appears in Quick Search), and enters it for editing.
+    /// The function starts with zero parameters and one "Result" output —
+    /// use `add_function_param`/`add_function_output` while inside it to
+    /// shape its signature; every existing GroupNode call site pointing at
+    /// this graph_id is kept in sync automatically.
+    fn create_function(&mut self, name: String) -> GraphId {
+        let id = self.next_graph_id;
+        self.next_graph_id += 1;
+        self.subgraphs.insert(id, (HashMap::new(), Vec::new()));
+        self.graph_names.insert(id, name.clone());
+        self.graph_kinds.insert(id, GraphKind::Function);
+        self.graph_boundary.insert(
+            id,
+            (Vec::new(), vec![BoundaryPin { label: "Result".to_string(), is_exec: false, data_type: PinDataType::Number }]),
+        );
+        self.enter_subgraph(id);
+        self.status_message = format!("Created function '{}'. Add params, then spawn calls from Quick Search.", name);
+        id
+    }
+
+    /// Adds one Number parameter to the function graph currently open, both
+    /// as a `GroupInput` node inside the scope and as a boundary-pin entry,
+    /// then re-syncs every existing call-site GroupNode for this graph_id.
+    fn add_function_param(&mut self, label: String) {
+        let graph_id = self.active_graph_id();
+        if self.graph_kinds.get(&graph_id) != Some(&GraphKind::Function) {
+            self.status_message = "Add Param only works inside a function definition.".to_string();
+            return;
+        }
+        let (inputs, _) = self.graph_boundary.entry(graph_id).or_default();
+        let slot = inputs.len();
+        inputs.push(BoundaryPin { label: label.clone(), is_exec: false, data_type: PinDataType::Number });
+
+        let iface_id = self.next_id;
+        self.next_id += 1;
+        self.nodes.insert(iface_id, Node {
+            id: iface_id,
+            kind: NodeKind::GroupInput { slot, label: label.clone(), is_exec: false, data_type: PinDataType::Number },
+            pos: Pos2::new(-160.0, slot as f32 * 70.0),
+        });
+
+        self.sync_group_call_sites(graph_id);
+        self.status_message = format!("Added parameter '{}'.", label);
+    }
+
+    /// Rewrites every GroupNode in the currently-open graph that points at
+    /// `graph_id` so its cached pin layout matches `graph_boundary[graph_id]`
+    /// again. (Call sites sitting in a *parked* sub-graph are not reachable
+    /// without opening them — this is a known limitation, see notes.)
+    fn sync_group_call_sites(&mut self, graph_id: GraphId) {
+        let (inputs, outputs) = match self.graph_boundary.get(&graph_id) {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        for node in self.nodes.values_mut() {
+            if let NodeKind::GroupNode { graph_id: g, exec_in, exec_out, data_in, data_out, .. } = &mut node.kind {
+                if *g == graph_id {
+                    *exec_in = inputs.iter().filter(|p| p.is_exec).map(|p| p.label.clone()).collect();
+                    *exec_out = outputs.iter().filter(|p| p.is_exec).map(|p| p.label.clone()).collect();
+                    *data_in = inputs
+                        .iter()
+                        .filter(|p| !p.is_exec)
+                        .map(|p| (p.label.clone(), p.data_type))
+                        .collect();
+                    *data_out = outputs
+                        .iter()
+                        .filter(|p| !p.is_exec)
+                        .map(|p| (p.label.clone(), p.data_type))
+                        .collect();
+                }
+            }
+        }
+    }
+
+    /// Every registered Function-kind graph, for Quick Search / spawn UI.
+    fn function_definitions(&self) -> Vec<(GraphId, String)> {
+        let mut v: Vec<(GraphId, String)> = self
+            .graph_kinds
+            .iter()
+            .filter(|(_, k)| **k == GraphKind::Function)
+            .map(|(id, _)| (*id, self.graph_names.get(id).cloned().unwrap_or_default()))
+            .collect();
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
+    }
+
+    /// Builds a fresh call-instance NodeKind::GroupNode for a registered
+    /// function graph_id, reading its current boundary pins.
+    fn build_function_call_node(&self, graph_id: GraphId) -> NodeKind {
+        let (inputs, outputs) = self.graph_boundary.get(&graph_id).cloned().unwrap_or_default();
+        let name = self.graph_names.get(&graph_id).cloned().unwrap_or_else(|| "Function".to_string());
+        NodeKind::GroupNode {
+            graph_id,
+            name,
+            exec_in: inputs.iter().filter(|p| p.is_exec).map(|p| p.label.clone()).collect(),
+            exec_out: outputs.iter().filter(|p| p.is_exec).map(|p| p.label.clone()).collect(),
+            data_in: inputs
+                .iter()
+                .filter(|p| !p.is_exec)
+                .map(|p| (p.label.clone(), p.data_type))
+                .collect(),
+            data_out: outputs
+                .iter()
+                .filter(|p| !p.is_exec)
+                .map(|p| (p.label.clone(), p.data_type))
+                .collect(),
+        }
     }
 
     fn add_node(&mut self, kind: NodeKind) {
@@ -2095,7 +2909,24 @@ impl BlockoApp {
             return;
         }
 
-        let catalog = search_catalog();
+        let mut rows: Vec<SearchRow> = search_catalog()
+            .into_iter()
+            .map(|e| SearchRow {
+                label: e.label.to_string(),
+                category: e.category,
+                keywords: e.keywords.to_string(),
+                spawn: SearchSpawn::Static(e.factory),
+            })
+            .collect();
+        for (graph_id, name) in self.function_definitions() {
+            rows.push(SearchRow {
+                keywords: format!("function call {}", name.to_lowercase()),
+                label: format!("ƒ {}", name),
+                category: "Functions",
+                spawn: SearchSpawn::Function(graph_id),
+            });
+        }
+        let catalog = rows;
         let mut close_after = false;
         let mut spawn_choice: Option<usize> = None;
         // Filled in inside the window closure (after the query TextEdit has
@@ -2135,7 +2966,7 @@ impl BlockoApp {
                             || entry.keywords.contains(query_lower.as_str())
                     })
                     .collect();
-                matches.sort_by_key(|&i| (catalog[i].category, catalog[i].label));
+                matches.sort_by_key(|&i| (catalog[i].category, catalog[i].label.clone()));
                 if self.quick_search.selected >= matches.len() {
                     self.quick_search.selected = matches.len().saturating_sub(1);
                 }
@@ -2197,7 +3028,10 @@ impl BlockoApp {
         });
 
         if let Some(catalog_idx) = spawn_choice {
-            let kind = (catalog[catalog_idx].factory)();
+            let kind = match &catalog[catalog_idx].spawn {
+                SearchSpawn::Static(f) => f(),
+                SearchSpawn::Function(graph_id) => self.build_function_call_node(*graph_id),
+            };
             let spawn_at = self.quick_search.spawn_at;
             self.add_node_at(kind, spawn_at);
             close_after = true;
@@ -2373,6 +3207,7 @@ impl BlockoApp {
                     Some(Value::Number(else_val))
                 }
             }
+            NodeKind::Plugin(_) => call_cache.get(&node_id).copied().map(Value::Number),
             _ => None,
         };
 
@@ -2547,11 +3382,46 @@ impl BlockoApp {
                     *return_slot = Some(value);
                     return;
                 }
+                NodeKind::Plugin(inst) => {
+                    if let Some(plugin) = plugin_registry().lock().unwrap().find(inst.plugin_id) {
+                        let inputs = self.collect_plugin_inputs(id, inst, variables, call_cache);
+                        let mut sim_ctx = SimCtx { console, step: *steps };
+                        let result = plugin.simulate(&mut sim_ctx, inst.node_type, &inst.config, &inputs);
+                        if let Some(first) = result.outputs.first() {
+                            call_cache.insert(id, first.as_number().unwrap_or(0.0));
+                        }
+                    }
+                    current = self.find_exec_target(id, 0);
+                }
                 _ => {
                     current = None;
                 }
             }
         }
+    }
+
+    fn collect_plugin_inputs(
+        &self,
+        node_id: NodeId,
+        inst: &PluginInstance,
+        variables: &HashMap<String, f32>,
+        call_cache: &HashMap<NodeId, f32>,
+    ) -> Vec<PluginRuntimeValue> {
+        let mut inputs = Vec::new();
+        if let Some(def) = plugin_def_for(inst) {
+            for i in 0..def.data_inputs.len() {
+                let mut visiting = Vec::new();
+                let value = self
+                    .find_source_for_input(node_id, i)
+                    .and_then(|src| self.evaluate_output(src.node_id, &mut visiting, variables, call_cache));
+                inputs.push(match value {
+                    Some(Value::Number(n)) => PluginRuntimeValue::Number(n),
+                    Some(Value::Bool(b)) => PluginRuntimeValue::Bool(b),
+                    None => PluginRuntimeValue::Number(0.0),
+                });
+            }
+        }
+        inputs
     }
 
     fn run_legacy_prints(&self, console: &mut Vec<String>) {
@@ -2931,6 +3801,33 @@ impl BlockoApp {
                     };
                     out.push(IRStmt::Return(value_var));
                     current = None;
+                }
+                NodeKind::Plugin(inst) => {
+                    let mut arg_vars = Vec::new();
+                    if let Some(def) = plugin_def_for(inst) {
+                        for i in 0..def.data_inputs.len() {
+                            let mut visiting = Vec::new();
+                            let var = self
+                                .find_source_for_input(id, i)
+                                .and_then(|src| {
+                                    self.build_expr_ir(src.node_id, &mut var_names, &mut out, counters, &mut visiting)
+                                })
+                                .map(|(n, _)| n)
+                                .unwrap_or_else(|| "0.0".to_string());
+                            arg_vars.push(var);
+                        }
+                        let out_vars: Vec<String> = (0..def.data_outputs.len())
+                            .map(|i| format!("plugin_{}_{}_{}", inst.node_type, id, i))
+                            .collect();
+                        out.push(IRStmt::PluginCall {
+                            plugin_id: inst.plugin_id,
+                            node_type: inst.node_type,
+                            config: inst.config.clone(),
+                            arg_vars,
+                            out_vars,
+                        });
+                    }
+                    current = self.find_exec_target(id, 0);
                 }
                 _ => {
                     current = None;
@@ -3314,6 +4211,15 @@ fn pin_color(data_type: PinDataType) -> Color32 {
         PinDataType::Bool => theme::PIN_BOOL,
         PinDataType::Any => theme::PIN_ANY,
         PinDataType::Exec => theme::PIN_EXEC,
+        PinDataType::Semantic(id) => {
+            let (r, g, b) = plugin_registry()
+                .lock()
+                .unwrap()
+                .semantic_type(id)
+                .map(|t| t.color)
+                .unwrap_or((180, 180, 180));
+            Color32::from_rgb(r, g, b)
+        }
     }
 }
 
@@ -3402,6 +4308,55 @@ impl eframe::App for BlockoApp {
                 ui.separator();
                 ui.toggle_value(&mut self.show_variable_inspector, "🔍 Variables");
                 ui.separator();
+
+                // --- Stage 17: Sub-graphs & reusable functions ---
+                let group_enabled = self.selection.len() >= 2;
+                if ui
+                    .add_enabled(group_enabled, egui::Button::new("📦 Group Selected"))
+                    .clicked()
+                {
+                    self.show_group_prompt = true;
+                }
+                if self.show_group_prompt {
+                    ui.add(egui::TextEdit::singleline(&mut self.group_prompt_text).desired_width(120.0));
+                    if ui.button("✔").clicked() {
+                        let title = self.group_prompt_text.clone();
+                        self.group_selected_nodes(title);
+                        self.show_group_prompt = false;
+                    }
+                    if ui.button("✖").clicked() {
+                        self.show_group_prompt = false;
+                    }
+                }
+                ui.separator();
+                if ui.button("ƒ New Function").clicked() {
+                    self.show_new_function_prompt = true;
+                }
+                if self.show_new_function_prompt {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_function_prompt_text).desired_width(120.0),
+                    );
+                    if ui.button("✔").clicked() {
+                        let name = self.new_function_prompt_text.clone();
+                        self.create_function(name);
+                        self.show_new_function_prompt = false;
+                    }
+                    if ui.button("✖").clicked() {
+                        self.show_new_function_prompt = false;
+                    }
+                }
+                if self.graph_kinds.get(&self.active_graph_id()) == Some(&GraphKind::Function) {
+                    ui.separator();
+                    if ui.button("+ Param").clicked() {
+                        let n = self
+                            .graph_boundary
+                            .get(&self.active_graph_id())
+                            .map(|(i, _)| i.len())
+                            .unwrap_or(0);
+                        self.add_function_param(format!("param{}", n + 1));
+                    }
+                }
+                ui.separator();
                 if ui.button("Export Source").clicked() {
                     self.export_code();
                 }
@@ -3411,6 +4366,39 @@ impl eframe::App for BlockoApp {
                 }
                 if ui.button("Load").clicked() {
                     self.load_project();
+                }
+            });
+        });
+
+        // --- Stage 17: Breadcrumb bar for sub-graph navigation ---
+        egui::TopBottomPanel::top("breadcrumb_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                let stack = self.graph_stack.clone();
+                for (i, graph_id) in stack.iter().enumerate() {
+                    if i > 0 {
+                        ui.label(egui::RichText::new("›").color(theme::TEXT_MUTED));
+                    }
+                    let name = self.graph_names.get(graph_id).cloned().unwrap_or_default();
+                    let is_current = i == stack.len() - 1;
+                    let text = egui::RichText::new(name).color(if is_current {
+                        theme::TEXT_PRIMARY
+                    } else {
+                        theme::TEXT_MUTED
+                    });
+                    let text = if is_current { text.strong() } else { text };
+                    let resp = ui.add(egui::Label::new(text).sense(Sense::click()));
+                    if resp.clicked() && !is_current {
+                        self.navigate_to_breadcrumb(i);
+                    }
+                }
+                if let Some(kind) = self.graph_kinds.get(&self.active_graph_id()) {
+                    ui.separator();
+                    let badge = match kind {
+                        GraphKind::Group => "Group scope",
+                        GraphKind::Function => "Function scope",
+                    };
+                    ui.label(egui::RichText::new(badge).size(10.5).color(theme::TEXT_MUTED));
                 }
             });
         });
@@ -3752,7 +4740,11 @@ impl eframe::App for BlockoApp {
                 }
             }
 
-            ui.interact(canvas_rect, ui.id().with("canvas_bg"), Sense::click());
+            let canvas_bg_response =
+                ui.interact(canvas_rect, ui.id().with("canvas_bg"), Sense::click());
+            if canvas_bg_response.clicked() {
+                self.selection.clear();
+            }
 
             // Pan: middle-mouse or right-mouse drag only. Left-drag is
             // reserved for moving nodes. Read raw pointer state instead of
@@ -3802,6 +4794,7 @@ impl eframe::App for BlockoApp {
             let mut nodes_to_disconnect: Vec<NodeId> = Vec::new();
             let mut new_connection: Option<Connection> = None;
             let mut cancel_drag = false;
+            let mut pending_enter_graph: Option<GraphId> = None;
 
             for node_id in node_ids {
                 let node = self.nodes.get_mut(&node_id).unwrap();
@@ -3833,7 +4826,7 @@ impl eframe::App for BlockoApp {
                 painter.text(
                     Pos2::new(node_rect.left() + 12.0, title_rect.center().y),
                     Align2::LEFT_CENTER,
-                    node.kind.title(),
+                    node.kind.title_owned(),
                     FontId::proportional(14.0 * z),
                     theme::TEXT_PRIMARY,
                 );
@@ -3873,6 +4866,14 @@ impl eframe::App for BlockoApp {
                     painter.rect_stroke(node_rect, 8.0, Stroke::new(2.0, glow_color));
                 }
 
+                if self.selection.contains(&node_id) {
+                    painter.rect_stroke(
+                        node_rect.expand(2.0 * z),
+                        9.0 * z,
+                        Stroke::new(1.5, Color32::from_rgb(240, 200, 90)),
+                    );
+                }
+
                 if self.breakpoints.contains(&node_id) {
                     painter.circle_filled(
                         node_rect.left_top() + Vec2::new(10.0 * z, 10.0 * z),
@@ -3891,8 +4892,22 @@ impl eframe::App for BlockoApp {
                 if drag_response.dragged() {
                     node.pos += drag_response.drag_delta() / z;
                 }
+                if drag_response.clicked() {
+                    let additive = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
+                    if additive {
+                        if !self.selection.remove(&node_id) {
+                            self.selection.insert(node_id);
+                        }
+                    } else {
+                        self.selection.clear();
+                        self.selection.insert(node_id);
+                    }
+                }
                 if drag_response.double_clicked() {
-                    nodes_to_disconnect.push(node_id);
+                    match &node.kind {
+                        NodeKind::GroupNode { graph_id, .. } => pending_enter_graph = Some(*graph_id),
+                        _ => nodes_to_disconnect.push(node_id),
+                    }
                 }
 
                 if let NodeKind::Compare(op) = &mut node.kind {
@@ -4016,8 +5031,8 @@ impl eframe::App for BlockoApp {
                     _ => {}
                 }
 
-                let exec_in_labels = node.kind.exec_input_labels();
-                let exec_out_labels = node.kind.exec_output_labels();
+                let exec_in_labels = node.kind.exec_input_labels_owned();
+                let exec_out_labels = node.kind.exec_output_labels_owned();
                 let exec_rows = exec_in_labels.len().max(exec_out_labels.len());
 
                 for row in 0..exec_rows {
@@ -4044,7 +5059,7 @@ impl eframe::App for BlockoApp {
                         painter.text(
                             pin_pos + Vec2::new(10.0, 0.0),
                             Align2::LEFT_CENTER,
-                            exec_in_labels[row],
+                            &exec_in_labels[row],
                             FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
@@ -4085,7 +5100,7 @@ impl eframe::App for BlockoApp {
                         painter.text(
                             pin_pos - Vec2::new(10.0, 0.0),
                             Align2::RIGHT_CENTER,
-                            exec_out_labels[row],
+                            &exec_out_labels[row],
                             FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
@@ -4104,8 +5119,8 @@ impl eframe::App for BlockoApp {
                     }
                 }
 
-                let input_labels = node.kind.input_labels();
-                let output_labels = node.kind.output_labels();
+                let input_labels = node.kind.input_labels_owned();
+                let output_labels = node.kind.output_labels_owned();
                 let input_types = node.kind.input_types();
                 let output_types = node.kind.output_types();
                 let data_rows = input_labels.len().max(output_labels.len()).max(1);
@@ -4135,7 +5150,7 @@ impl eframe::App for BlockoApp {
                         painter.text(
                             pin_pos + Vec2::new(10.0, 0.0),
                             Align2::LEFT_CENTER,
-                            input_labels[row],
+                            &input_labels[row],
                             FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
@@ -4177,7 +5192,7 @@ impl eframe::App for BlockoApp {
                         painter.text(
                             pin_pos - Vec2::new(10.0, 0.0),
                             Align2::RIGHT_CENTER,
-                            output_labels[row],
+                            &output_labels[row],
                             FontId::proportional(12.0 * z),
                             theme::TEXT_MUTED,
                         );
@@ -4205,6 +5220,10 @@ impl eframe::App for BlockoApp {
 
             for node_id in nodes_to_disconnect {
                 self.remove_connections_for(node_id);
+            }
+
+            if let Some(graph_id) = pending_enter_graph {
+                self.enter_subgraph(graph_id);
             }
 
             if let Some(dragging) = &mut self.dragging_connection {
