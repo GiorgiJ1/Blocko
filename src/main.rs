@@ -3,194 +3,12 @@ use egui::epaint::CubicBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 type NodeId = u64;
 type GraphId = u64;
-type SemanticTypeId = u64;
-type PluginId = u64;
-type NodeTypeId = u64;
 type Counters = (usize, usize, usize, usize, usize, usize);
 const ROOT_GRAPH_ID: GraphId = 0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum PluginPinType {
-    Number,
-    Bool,
-    Any,
-    Exec,
-    Semantic(SemanticTypeId),
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct PluginConfig {
-    values: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct PluginInstance {
-    plugin_id: PluginId,
-    node_type: NodeTypeId,
-    config: PluginConfig,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-enum PluginRuntimeValue {
-    Number(f32),
-    Bool(bool),
-}
-
-impl PluginRuntimeValue {
-    fn as_number(&self) -> Option<f32> {
-        match self {
-            PluginRuntimeValue::Number(v) => Some(*v),
-            PluginRuntimeValue::Bool(_) => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SemanticType {
-    id: SemanticTypeId,
-    name: &'static str,
-    color: (u8, u8, u8),
-}
-
-#[derive(Debug, Clone)]
-struct PluginDefinition {
-    title: &'static str,
-    data_inputs: Vec<(&'static str, PluginPinType)>,
-    data_outputs: Vec<(&'static str, PluginPinType)>,
-    exec_inputs: Vec<&'static str>,
-    exec_outputs: Vec<&'static str>,
-    fields: Vec<(&'static str, &'static str)>,
-}
-
-#[derive(Debug, Clone)]
-struct PluginCodeResult {
-    imports: Vec<String>,
-    lines: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct PluginSimulationResult {
-    outputs: Vec<PluginRuntimeValue>,
-}
-
-#[derive(Debug, Clone)]
-struct PluginHandle {
-    def: PluginDefinition,
-}
-
-impl PluginHandle {
-    fn codegen(
-        &self,
-        _ctx: &CodeGenCtx,
-        _node_type: NodeTypeId,
-        _config: &PluginConfig,
-    ) -> Option<PluginCodeResult> {
-        Some(PluginCodeResult {
-            imports: Vec::new(),
-            lines: vec![format!("// {} plugin stub", self.def.title)],
-        })
-    }
-
-    fn simulate(
-        &self,
-        _ctx: &mut SimCtx,
-        _node_type: NodeTypeId,
-        _config: &PluginConfig,
-        inputs: &[PluginRuntimeValue],
-    ) -> PluginSimulationResult {
-        let outputs = if inputs.is_empty() {
-            vec![PluginRuntimeValue::Number(0.0)]
-        } else {
-            vec![inputs[0].clone()]
-        };
-        PluginSimulationResult { outputs }
-    }
-}
-
-#[derive(Debug, Default)]
-struct PluginRegistry {
-    plugins: HashMap<PluginId, PluginHandle>,
-    semantic_types: HashMap<SemanticTypeId, SemanticType>,
-}
-
-impl PluginRegistry {
-    fn find(&self, plugin_id: PluginId) -> Option<&PluginHandle> {
-        self.plugins.get(&plugin_id)
-    }
-
-    fn semantic_type(&self, semantic_id: SemanticTypeId) -> Option<SemanticType> {
-        self.semantic_types.get(&semantic_id).copied()
-    }
-}
-
-static PLUGIN_REGISTRY: OnceLock<Arc<Mutex<PluginRegistry>>> = OnceLock::new();
-
-fn plugin_registry() -> Arc<Mutex<PluginRegistry>> {
-    PLUGIN_REGISTRY
-        .get_or_init(|| {
-            let mut registry = PluginRegistry::default();
-            registry.semantic_types.insert(
-                0,
-                SemanticType {
-                    id: 0,
-                    name: "Any",
-                    color: (180, 180, 180),
-                },
-            );
-            registry.plugins.insert(
-                0,
-                PluginHandle {
-                    def: PluginDefinition {
-                        title: "Plugin",
-                        data_inputs: vec![("Value", PluginPinType::Any)],
-                        data_outputs: vec![("Value", PluginPinType::Any)],
-                        exec_inputs: vec!["In"],
-                        exec_outputs: vec!["Out"],
-                        fields: vec![],
-                    },
-                },
-            );
-            Arc::new(Mutex::new(registry))
-        })
-        .clone()
-}
-
-fn plugin_def_for(inst: &PluginInstance) -> Option<PluginDefinition> {
-    plugin_registry()
-        .lock()
-        .unwrap()
-        .find(inst.plugin_id)
-        .map(|plugin| plugin.def.clone())
-}
-
-fn plugin_pin_type_to_data_type(pin_type: PluginPinType) -> PinDataType {
-    match pin_type {
-        PluginPinType::Number => PinDataType::Number,
-        PluginPinType::Bool => PinDataType::Bool,
-        PluginPinType::Any => PinDataType::Any,
-        PluginPinType::Exec => PinDataType::Exec,
-        PluginPinType::Semantic(id) => PinDataType::Semantic(id),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct CodeGenCtx<'a> {
-    lang: TargetLanguage,
-    indent: &'a str,
-    input_vars: &'a [String],
-    output_vars: &'a [String],
-}
-
-#[derive(Debug)]
-struct SimCtx<'a> {
-    console: &'a mut Vec<String>,
-    step: u32,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum CompareOp {
@@ -271,7 +89,13 @@ enum NodeKind {
         data_type: PinDataType,
     },
 
-    Plugin(PluginInstance),
+    // --- Stage 18: Plugin system ---
+    // Denormalized exactly like GroupNode: pin layout is resolved once at
+    // spawn time from the plugin registry and cached here, so every static
+    // NodeKind accessor keeps working without needing registry access.
+    // Only *behavior* (evaluate/execute/codegen) goes back to the registry,
+    // looked up by `def_id` at the few VM/codegen call sites that need it.
+    Plugin(PluginNodeState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -280,7 +104,6 @@ enum PinDataType {
     Bool,
     Any,
     Exec,
-    Semantic(SemanticTypeId),
 }
 
 impl NodeKind {
@@ -307,9 +130,7 @@ impl NodeKind {
             NodeKind::GroupNode { .. } => "Group",
             NodeKind::GroupInput { .. } => "Input",
             NodeKind::GroupOutput { .. } => "Output",
-            NodeKind::Plugin(inst) => plugin_def_for(inst)
-                .map(|d| d.title)
-                .unwrap_or("Unknown Plugin Node"),
+            NodeKind::Plugin(_) => "Plugin",
         }
     }
 
@@ -318,6 +139,7 @@ impl NodeKind {
     fn title_owned(&self) -> String {
         match self {
             NodeKind::GroupNode { name, .. } => name.clone(),
+            NodeKind::Plugin(state) => state.title.clone(),
             _ => self.title().to_string(),
         }
     }
@@ -339,6 +161,7 @@ impl NodeKind {
             NodeKind::FunctionCall { .. } => vec!["Arg1", "Arg2"],
             NodeKind::Return => vec!["Value"],
             NodeKind::GroupNode { data_in, .. } => vec![""; data_in.len()],
+            NodeKind::Plugin(state) => vec![""; state.data_in.len()],
             NodeKind::GroupInput { .. } => vec![],
             NodeKind::GroupOutput { is_exec, .. } => {
                 if *is_exec {
@@ -347,9 +170,6 @@ impl NodeKind {
                     vec!["Value"]
                 }
             }
-            NodeKind::Plugin(inst) => plugin_def_for(inst)
-                .map(|d| d.data_inputs.iter().map(|(l, _)| *l).collect())
-                .unwrap_or_default(),
         }
     }
 
@@ -369,6 +189,7 @@ impl NodeKind {
             NodeKind::FunctionCall { .. } => vec!["Result"],
             NodeKind::Return => vec![],
             NodeKind::GroupNode { data_out, .. } => vec![""; data_out.len()],
+            NodeKind::Plugin(state) => vec![""; state.data_out.len()],
             NodeKind::GroupInput { is_exec, .. } => {
                 if *is_exec {
                     vec![]
@@ -377,9 +198,6 @@ impl NodeKind {
                 }
             }
             NodeKind::GroupOutput { .. } => vec![],
-            NodeKind::Plugin(inst) => plugin_def_for(inst)
-                .map(|d| d.data_outputs.iter().map(|(l, _)| *l).collect())
-                .unwrap_or_default(),
         }
     }
 
@@ -402,6 +220,7 @@ impl NodeKind {
             NodeKind::FunctionCall { .. } => vec![PinDataType::Number, PinDataType::Number],
             NodeKind::Return => vec![PinDataType::Number],
             NodeKind::GroupNode { data_in, .. } => data_in.iter().map(|(_, t)| *t).collect(),
+            NodeKind::Plugin(state) => state.data_in.iter().map(|(_, t)| *t).collect(),
             NodeKind::GroupInput { .. } => vec![],
             NodeKind::GroupOutput { is_exec, data_type, .. } => {
                 if *is_exec {
@@ -410,9 +229,6 @@ impl NodeKind {
                     vec![*data_type]
                 }
             }
-            NodeKind::Plugin(inst) => plugin_def_for(inst)
-                .map(|d| d.data_inputs.iter().map(|(_, t)| plugin_pin_type_to_data_type(*t)).collect())
-                .unwrap_or_default(),
         }
     }
 
@@ -434,6 +250,7 @@ impl NodeKind {
             NodeKind::FunctionCall { .. } => vec![PinDataType::Number],
             NodeKind::Return => vec![],
             NodeKind::GroupNode { data_out, .. } => data_out.iter().map(|(_, t)| *t).collect(),
+            NodeKind::Plugin(state) => state.data_out.iter().map(|(_, t)| *t).collect(),
             NodeKind::GroupInput { is_exec, data_type, .. } => {
                 if *is_exec {
                     vec![]
@@ -442,9 +259,6 @@ impl NodeKind {
                 }
             }
             NodeKind::GroupOutput { .. } => vec![],
-            NodeKind::Plugin(inst) => plugin_def_for(inst)
-                .map(|d| d.data_outputs.iter().map(|(_, t)| plugin_pin_type_to_data_type(*t)).collect())
-                .unwrap_or_default(),
         }
     }
 
@@ -456,8 +270,8 @@ impl NodeKind {
             NodeKind::FunctionCall { .. } => vec!["In"],
             NodeKind::Return => vec!["In"],
             NodeKind::GroupNode { exec_in, .. } => vec![""; exec_in.len()],
+            NodeKind::Plugin(state) => vec![""; state.exec_in.len()],
             NodeKind::GroupOutput { is_exec, .. } if *is_exec => vec!["In"],
-            NodeKind::Plugin(inst) => plugin_def_for(inst).map(|d| d.exec_inputs).unwrap_or_default(),
             _ => vec![],
         }
     }
@@ -471,8 +285,8 @@ impl NodeKind {
             NodeKind::FunctionDef { .. } => vec!["Body"],
             NodeKind::FunctionCall { .. } => vec!["Out"],
             NodeKind::GroupNode { exec_out, .. } => vec![""; exec_out.len()],
+            NodeKind::Plugin(state) => vec![""; state.exec_out.len()],
             NodeKind::GroupInput { is_exec, .. } if *is_exec => vec!["Out"],
-            NodeKind::Plugin(inst) => plugin_def_for(inst).map(|d| d.exec_outputs).unwrap_or_default(),
             _ => vec![],
         }
     }
@@ -483,9 +297,6 @@ impl NodeKind {
             NodeKind::SetVariable(_) | NodeKind::GetVariable(_) => ROW_HEIGHT,
             NodeKind::FunctionDef { .. } => ROW_HEIGHT * 2.0,
             NodeKind::FunctionCall { .. } => ROW_HEIGHT,
-            NodeKind::Plugin(inst) => plugin_def_for(inst)
-                .map(|d| d.fields.len() as f32 * ROW_HEIGHT)
-                .unwrap_or(0.0),
             _ => 0.0,
         }
     }
@@ -592,6 +403,478 @@ struct BoundaryPin {
     label: String,
     is_exec: bool,
     data_type: PinDataType,
+}
+
+// ---------------------------------------------------------------------
+// Stage 18: Plugin system.
+//
+// `NodeKind::Plugin` is one closed variant standing in for an open set of
+// externally-registered node types (Networking, Hardware/IoT, ...), the
+// same denormalized-instance-plus-registry pattern already used for
+// `GroupNode` in Stage 17: pin *layout* is resolved once at spawn time and
+// cached on the instance (so title()/input_labels()/etc. stay pure, no
+// registry access needed for rendering); only *behavior* — evaluate,
+// execute, codegen — is looked up from the registry by `def_id`, at the
+// handful of VM/codegen call sites that actually run a node.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct PluginNodeId(String);
+
+/// A generically-renderable, per-instance config field (GPIO pin number,
+/// URL, HTTP method, poll interval, ...). The UI renders these without
+/// knowing anything about the specific plugin — see `draw_plugin_config_ui`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ConfigField {
+    Text { key: String, label: String, value: String },
+    Int { key: String, label: String, value: i64, min: i64, max: i64 },
+    Float { key: String, label: String, value: f32 },
+    Bool { key: String, label: String, value: bool },
+    Choice { key: String, label: String, options: Vec<String>, selected: usize },
+}
+
+fn config_text<'a>(fields: &'a [ConfigField], key: &str) -> Option<&'a str> {
+    fields.iter().find_map(|f| match f {
+        ConfigField::Text { key: k, value, .. } if k == key => Some(value.as_str()),
+        _ => None,
+    })
+}
+fn config_int(fields: &[ConfigField], key: &str) -> Option<i64> {
+    fields.iter().find_map(|f| match f {
+        ConfigField::Int { key: k, value, .. } if k == key => Some(*value),
+        _ => None,
+    })
+}
+fn config_bool(fields: &[ConfigField], key: &str) -> Option<bool> {
+    fields.iter().find_map(|f| match f {
+        ConfigField::Bool { key: k, value, .. } if k == key => Some(*value),
+        _ => None,
+    })
+}
+fn config_choice<'a>(fields: &'a [ConfigField], key: &str) -> Option<&'a str> {
+    fields.iter().find_map(|f| match f {
+        ConfigField::Choice { key: k, options, selected, .. } if k == key => {
+            options.get(*selected).map(|s| s.as_str())
+        }
+        _ => None,
+    })
+}
+
+/// Per-instance state for a `NodeKind::Plugin` node: which registered def it
+/// is, its resolved pin layout (cached at spawn time), and its current
+/// config field values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PluginNodeState {
+    def_id: PluginNodeId,
+    title: String,
+    exec_in: Vec<String>,
+    exec_out: Vec<String>,
+    data_in: Vec<(String, PinDataType)>,
+    data_out: Vec<(String, PinDataType)>,
+    config: Vec<ConfigField>,
+}
+
+/// Execution context handed to a plugin's runtime hooks — a narrow,
+/// capability-scoped view rather than raw engine internals.
+struct EvalContext<'a> {
+    config: &'a [ConfigField],
+    inputs: &'a [Option<Value>],
+}
+
+struct ExecContext<'a> {
+    config: &'a [ConfigField],
+    inputs: &'a [Option<Value>],
+    console: &'a mut Vec<String>,
+    effects: &'a mut Vec<PluginEffect>,
+}
+
+/// Side-effect a plugin node *would* perform. Routed through here rather
+/// than touching real GPIO/sockets directly from inside `execute()`: the
+/// debugger can pause/step/restart execution arbitrarily, and a plugin that
+/// fires real I/O the instant `execute()` runs would misfire badly under
+/// restart (which re-walks the graph from node 0) or repeated stepping.
+#[derive(Debug, Clone)]
+enum PluginEffect {
+    GpioWrite { pin: u8, high: bool },
+    GpioRead { pin: u8 },
+    HttpRequest { method: String, url: String },
+    Log(String),
+}
+
+fn describe_plugin_effect(effect: &PluginEffect) -> String {
+    match effect {
+        PluginEffect::GpioWrite { pin, high } => {
+            format!("[sim] GPIO{} -> {}", pin, if *high { "HIGH" } else { "LOW" })
+        }
+        PluginEffect::GpioRead { pin } => format!("[sim] GPIO{} read", pin),
+        PluginEffect::HttpRequest { method, url } => format!("[sim] {} {}", method, url),
+        PluginEffect::Log(msg) => msg.clone(),
+    }
+}
+
+/// One node type contributed by a plugin. Object-safe, so packs register
+/// `Box<dyn PluginNodeDef>` trait objects — this is the extensibility seam.
+trait PluginNodeDef: Send + Sync {
+    fn id(&self) -> PluginNodeId;
+    fn title(&self) -> &'static str;
+    fn category(&self) -> &'static str;
+    fn pins(&self) -> (Vec<(String, bool, Option<PinDataType>)>, Vec<(String, bool, Option<PinDataType>)>);
+    fn default_config(&self) -> Vec<ConfigField>;
+
+    /// Pure data-flow evaluation (mirrors `BlockoApp::evaluate_output`).
+    /// `None` for statement-only nodes.
+    fn evaluate(&self, _ctx: &EvalContext) -> Option<Value> {
+        None
+    }
+    /// Imperative execution (mirrors one iteration of `exec_statement`).
+    /// No-op for pure data-flow nodes.
+    fn execute(&self, _ctx: &mut ExecContext) {}
+    /// Emit source for one target language at this node's call site.
+    /// `None` means this pack doesn't support that language here.
+    fn codegen(&self, _lang: TargetLanguage, _config: &[ConfigField]) -> Option<String> {
+        None
+    }
+}
+
+/// A plugin registers a batch of related node defs (a "pack") — the unit
+/// an extension crate implements and hands to `PluginRegistry::install`.
+trait BlockoPlugin: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn version(&self) -> &'static str;
+    fn node_defs(&self) -> Vec<Box<dyn PluginNodeDef>>;
+}
+
+struct PluginRegistry {
+    plugins: Vec<Box<dyn BlockoPlugin>>,
+    node_defs: HashMap<PluginNodeId, Box<dyn PluginNodeDef>>,
+}
+
+impl PluginRegistry {
+    fn new() -> Self {
+        Self { plugins: Vec::new(), node_defs: HashMap::new() }
+    }
+
+    fn install(&mut self, plugin: Box<dyn BlockoPlugin>) {
+        for def in plugin.node_defs() {
+            self.node_defs.insert(def.id(), def);
+        }
+        self.plugins.push(plugin);
+    }
+
+    fn def(&self, id: &PluginNodeId) -> Option<&dyn PluginNodeDef> {
+        self.node_defs.get(id).map(|b| b.as_ref())
+    }
+
+    fn all_defs(&self) -> impl Iterator<Item = &dyn PluginNodeDef> {
+        self.node_defs.values().map(|b| b.as_ref())
+    }
+
+    /// Builds a fresh call-instance `PluginNodeState`, resolving the def's
+    /// current pin layout. This is the one place registry data gets
+    /// denormalized onto a node instance.
+    fn build_instance(&self, id: &PluginNodeId) -> Option<PluginNodeState> {
+        let def = self.def(id)?;
+        let (ins, outs) = def.pins();
+        Some(PluginNodeState {
+            def_id: id.clone(),
+            title: def.title().to_string(),
+            exec_in: ins.iter().filter(|(_, is_exec, _)| *is_exec).map(|(l, _, _)| l.clone()).collect(),
+            exec_out: outs.iter().filter(|(_, is_exec, _)| *is_exec).map(|(l, _, _)| l.clone()).collect(),
+            data_in: ins
+                .iter()
+                .filter(|(_, is_exec, _)| !is_exec)
+                .map(|(l, _, t)| (l.clone(), t.unwrap_or(PinDataType::Any)))
+                .collect(),
+            data_out: outs
+                .iter()
+                .filter(|(_, is_exec, _)| !is_exec)
+                .map(|(l, _, t)| (l.clone(), t.unwrap_or(PinDataType::Any)))
+                .collect(),
+            config: def.default_config(),
+        })
+    }
+}
+
+// --- Stage 18: Networking extension pack ---
+
+struct NetworkingPlugin;
+impl BlockoPlugin for NetworkingPlugin {
+    fn name(&self) -> &'static str {
+        "Networking"
+    }
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+    fn node_defs(&self) -> Vec<Box<dyn PluginNodeDef>> {
+        vec![
+            Box::new(HttpRequestNode),
+            Box::new(TcpSendNode),
+            Box::new(UdpSendNode),
+        ]
+    }
+}
+
+struct HttpRequestNode;
+impl PluginNodeDef for HttpRequestNode {
+    fn id(&self) -> PluginNodeId {
+        PluginNodeId("net.http_request".to_string())
+    }
+    fn title(&self) -> &'static str {
+        "HTTP Request"
+    }
+    fn category(&self) -> &'static str {
+        "Networking"
+    }
+    fn pins(&self) -> (Vec<(String, bool, Option<PinDataType>)>, Vec<(String, bool, Option<PinDataType>)>) {
+        (
+            vec![("In".to_string(), true, None)],
+            vec![("Out".to_string(), true, None), ("Status".to_string(), false, Some(PinDataType::Number))],
+        )
+    }
+    fn default_config(&self) -> Vec<ConfigField> {
+        vec![
+            ConfigField::Choice {
+                key: "method".to_string(),
+                label: "Method".to_string(),
+                options: vec!["GET".to_string(), "POST".to_string(), "PUT".to_string(), "DELETE".to_string()],
+                selected: 0,
+            },
+            ConfigField::Text { key: "url".to_string(), label: "URL".to_string(), value: "https://example.com".to_string() },
+        ]
+    }
+    fn execute(&self, ctx: &mut ExecContext) {
+        let method = config_choice(ctx.config, "method").unwrap_or("GET").to_string();
+        let url = config_text(ctx.config, "url").unwrap_or("").to_string();
+        ctx.effects.push(PluginEffect::HttpRequest { method, url });
+    }
+    fn codegen(&self, lang: TargetLanguage, config: &[ConfigField]) -> Option<String> {
+        let method = config_choice(config, "method")?;
+        let url = config_text(config, "url")?;
+        Some(match lang {
+            TargetLanguage::Python => format!("requests.request(\"{}\", \"{}\")", method, url),
+            TargetLanguage::Rust => format!(
+                "reqwest::blocking::Client::new().request(reqwest::Method::{}, \"{}\").send()?;",
+                method, url
+            ),
+            TargetLanguage::JavaScript => format!("await fetch(\"{}\", {{ method: \"{}\" }})", url, method),
+            TargetLanguage::Cpp => return None,
+        })
+    }
+}
+
+struct TcpSendNode;
+impl PluginNodeDef for TcpSendNode {
+    fn id(&self) -> PluginNodeId {
+        PluginNodeId("net.tcp_send".to_string())
+    }
+    fn title(&self) -> &'static str {
+        "TCP Send"
+    }
+    fn category(&self) -> &'static str {
+        "Networking"
+    }
+    fn pins(&self) -> (Vec<(String, bool, Option<PinDataType>)>, Vec<(String, bool, Option<PinDataType>)>) {
+        (vec![("In".to_string(), true, None)], vec![("Out".to_string(), true, None)])
+    }
+    fn default_config(&self) -> Vec<ConfigField> {
+        vec![
+            ConfigField::Text { key: "host".to_string(), label: "Host".to_string(), value: "127.0.0.1".to_string() },
+            ConfigField::Int { key: "port".to_string(), label: "Port".to_string(), value: 9000, min: 1, max: 65535 },
+            ConfigField::Text { key: "message".to_string(), label: "Message".to_string(), value: "ping".to_string() },
+        ]
+    }
+    fn execute(&self, ctx: &mut ExecContext) {
+        let host = config_text(ctx.config, "host").unwrap_or("127.0.0.1");
+        let port = config_int(ctx.config, "port").unwrap_or(9000);
+        let msg = config_text(ctx.config, "message").unwrap_or("");
+        ctx.effects.push(PluginEffect::Log(format!("[sim] TCP {}:{} <- \"{}\"", host, port, msg)));
+    }
+    fn codegen(&self, lang: TargetLanguage, config: &[ConfigField]) -> Option<String> {
+        let host = config_text(config, "host")?;
+        let port = config_int(config, "port")?;
+        let msg = config_text(config, "message")?;
+        Some(match lang {
+            TargetLanguage::Rust => format!(
+                "std::net::TcpStream::connect((\"{}\", {}))?.write_all(b\"{}\")?;",
+                host, port, msg
+            ),
+            TargetLanguage::Python => format!(
+                "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.connect((\"{}\", {})); s.sendall(b\"{}\")",
+                host, port, msg
+            ),
+            TargetLanguage::JavaScript | TargetLanguage::Cpp => return None,
+        })
+    }
+}
+
+struct UdpSendNode;
+impl PluginNodeDef for UdpSendNode {
+    fn id(&self) -> PluginNodeId {
+        PluginNodeId("net.udp_send".to_string())
+    }
+    fn title(&self) -> &'static str {
+        "UDP Send"
+    }
+    fn category(&self) -> &'static str {
+        "Networking"
+    }
+    fn pins(&self) -> (Vec<(String, bool, Option<PinDataType>)>, Vec<(String, bool, Option<PinDataType>)>) {
+        (vec![("In".to_string(), true, None)], vec![("Out".to_string(), true, None)])
+    }
+    fn default_config(&self) -> Vec<ConfigField> {
+        vec![
+            ConfigField::Text { key: "host".to_string(), label: "Host".to_string(), value: "127.0.0.1".to_string() },
+            ConfigField::Int { key: "port".to_string(), label: "Port".to_string(), value: 9001, min: 1, max: 65535 },
+            ConfigField::Text { key: "message".to_string(), label: "Message".to_string(), value: "ping".to_string() },
+        ]
+    }
+    fn execute(&self, ctx: &mut ExecContext) {
+        let host = config_text(ctx.config, "host").unwrap_or("127.0.0.1");
+        let port = config_int(ctx.config, "port").unwrap_or(9001);
+        let msg = config_text(ctx.config, "message").unwrap_or("");
+        ctx.effects.push(PluginEffect::Log(format!("[sim] UDP {}:{} <- \"{}\"", host, port, msg)));
+    }
+    fn codegen(&self, lang: TargetLanguage, config: &[ConfigField]) -> Option<String> {
+        let host = config_text(config, "host")?;
+        let port = config_int(config, "port")?;
+        let msg = config_text(config, "message")?;
+        Some(match lang {
+            TargetLanguage::Rust => format!(
+                "std::net::UdpSocket::bind(\"0.0.0.0:0\")?.send_to(b\"{}\", (\"{}\", {}))?;",
+                msg, host, port
+            ),
+            TargetLanguage::Python => format!(
+                "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b\"{}\", (\"{}\", {}))",
+                msg, host, port
+            ),
+            TargetLanguage::JavaScript | TargetLanguage::Cpp => return None,
+        })
+    }
+}
+
+// --- Stage 18: Hardware / IoT extension pack ---
+
+struct HardwarePlugin;
+impl BlockoPlugin for HardwarePlugin {
+    fn name(&self) -> &'static str {
+        "Hardware / IoT"
+    }
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+    fn node_defs(&self) -> Vec<Box<dyn PluginNodeDef>> {
+        vec![Box::new(GpioWriteNode), Box::new(GpioReadNode), Box::new(TelemetryLogNode)]
+    }
+}
+
+struct GpioWriteNode;
+impl PluginNodeDef for GpioWriteNode {
+    fn id(&self) -> PluginNodeId {
+        PluginNodeId("hw.gpio_write".to_string())
+    }
+    fn title(&self) -> &'static str {
+        "GPIO Write"
+    }
+    fn category(&self) -> &'static str {
+        "Hardware / IoT"
+    }
+    fn pins(&self) -> (Vec<(String, bool, Option<PinDataType>)>, Vec<(String, bool, Option<PinDataType>)>) {
+        (
+            vec![("In".to_string(), true, None), ("High?".to_string(), false, Some(PinDataType::Bool))],
+            vec![("Out".to_string(), true, None)],
+        )
+    }
+    fn default_config(&self) -> Vec<ConfigField> {
+        vec![ConfigField::Int { key: "pin".to_string(), label: "BCM Pin".to_string(), value: 17, min: 0, max: 27 }]
+    }
+    fn execute(&self, ctx: &mut ExecContext) {
+        let pin = config_int(ctx.config, "pin").unwrap_or(17) as u8;
+        let high = matches!(ctx.inputs.get(0), Some(Some(Value::Bool(true))));
+        ctx.effects.push(PluginEffect::GpioWrite { pin, high });
+    }
+    fn codegen(&self, lang: TargetLanguage, config: &[ConfigField]) -> Option<String> {
+        let pin = config_int(config, "pin")?;
+        Some(match lang {
+            TargetLanguage::Rust => format!(
+                "gpio.get({})?.into_output().write(if high {{ Level::High }} else {{ Level::Low }});",
+                pin
+            ),
+            TargetLanguage::Python => format!("GPIO.output({}, GPIO.HIGH if high else GPIO.LOW)", pin),
+            TargetLanguage::JavaScript | TargetLanguage::Cpp => return None,
+        })
+    }
+}
+
+struct GpioReadNode;
+impl PluginNodeDef for GpioReadNode {
+    fn id(&self) -> PluginNodeId {
+        PluginNodeId("hw.gpio_read".to_string())
+    }
+    fn title(&self) -> &'static str {
+        "GPIO Read"
+    }
+    fn category(&self) -> &'static str {
+        "Hardware / IoT"
+    }
+    fn pins(&self) -> (Vec<(String, bool, Option<PinDataType>)>, Vec<(String, bool, Option<PinDataType>)>) {
+        (vec![], vec![("Value".to_string(), false, Some(PinDataType::Bool))])
+    }
+    fn default_config(&self) -> Vec<ConfigField> {
+        vec![ConfigField::Int { key: "pin".to_string(), label: "BCM Pin".to_string(), value: 27, min: 0, max: 27 }]
+    }
+    fn evaluate(&self, _ctx: &EvalContext) -> Option<Value> {
+        // Simulated: no live hardware backend attached, so this always
+        // reads as `false`. Attach a real backend at the `apply_plugin_effect`
+        // choke point (see design notes) to make this reflect actual state.
+        Some(Value::Bool(false))
+    }
+    fn codegen(&self, lang: TargetLanguage, config: &[ConfigField]) -> Option<String> {
+        let pin = config_int(config, "pin")?;
+        Some(match lang {
+            TargetLanguage::Rust => format!("gpio.get({})?.into_input().is_high()", pin),
+            TargetLanguage::Python => format!("GPIO.input({})", pin),
+            TargetLanguage::JavaScript | TargetLanguage::Cpp => return None,
+        })
+    }
+}
+
+struct TelemetryLogNode;
+impl PluginNodeDef for TelemetryLogNode {
+    fn id(&self) -> PluginNodeId {
+        PluginNodeId("hw.telemetry_log".to_string())
+    }
+    fn title(&self) -> &'static str {
+        "Telemetry Log"
+    }
+    fn category(&self) -> &'static str {
+        "Hardware / IoT"
+    }
+    fn pins(&self) -> (Vec<(String, bool, Option<PinDataType>)>, Vec<(String, bool, Option<PinDataType>)>) {
+        (
+            vec![("In".to_string(), true, None), ("Value".to_string(), false, Some(PinDataType::Number))],
+            vec![("Out".to_string(), true, None)],
+        )
+    }
+    fn default_config(&self) -> Vec<ConfigField> {
+        vec![ConfigField::Text { key: "label".to_string(), label: "Label".to_string(), value: "sensor".to_string() }]
+    }
+    fn execute(&self, ctx: &mut ExecContext) {
+        let label = config_text(ctx.config, "label").unwrap_or("sensor");
+        let value = match ctx.inputs.get(0) {
+            Some(Some(Value::Number(n))) => *n,
+            _ => 0.0,
+        };
+        ctx.effects.push(PluginEffect::Log(format!("[telemetry] {} = {}", label, value)));
+    }
+    fn codegen(&self, lang: TargetLanguage, config: &[ConfigField]) -> Option<String> {
+        let label = config_text(config, "label")?;
+        Some(match lang {
+            TargetLanguage::Python => format!("print(f\"[telemetry] {}={{value}}\")", label),
+            TargetLanguage::Rust => format!("println!(\"[telemetry] {}={{}}\", value);", label),
+            TargetLanguage::JavaScript => format!("console.log(\"[telemetry] {}=\" + value)", label),
+            TargetLanguage::Cpp => return None,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -818,12 +1101,14 @@ enum IRStmt {
         args: Vec<String>,
     },
     Return(String),
-    PluginCall {
-        plugin_id: PluginId,
-        node_type: NodeTypeId,
-        config: PluginConfig,
-        arg_vars: Vec<String>,
-        out_vars: Vec<String>,
+    /// Stage 18: pre-rendered, per-language source contributed by a plugin
+    /// node's own `PluginNodeDef::codegen`. Built once per language at IR
+    /// build time (rather than threading a target-language parameter
+    /// through the whole IR builder) since the rest of the IR is
+    /// language-agnostic by design.
+    Raw {
+        by_lang: Vec<(TargetLanguage, String)>,
+        label: String,
     },
 }
 
@@ -905,6 +1190,10 @@ fn emit_python_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>) {
             }
             IRStmt::Print { value_var } => lines.push(format!("{}print({})", pad, value_var)),
             IRStmt::Comment(msg) => lines.push(format!("{}# {}", pad, msg)),
+            IRStmt::Raw { by_lang, label } => match by_lang.iter().find(|(l, _)| *l == TargetLanguage::Python) {
+                Some((_, code)) => lines.push(format!("{}{}", pad, code)),
+                None => lines.push(format!("{}# unsupported node for this target: {}", pad, label)),
+            },
             IRStmt::CallFunction {
                 var_name,
                 func_name,
@@ -917,22 +1206,6 @@ fn emit_python_stmts(stmts: &[IRStmt], indent: usize, lines: &mut Vec<String>) {
                 args.join(", ")
             )),
             IRStmt::Return(v) => lines.push(format!("{}return {}", pad, v)),
-            IRStmt::PluginCall { plugin_id, node_type, config, arg_vars, out_vars } => {
-                if let Some(plugin) = plugin_registry().lock().unwrap().find(*plugin_id) {
-                    let gen_ctx = CodeGenCtx {
-                        lang: TargetLanguage::Python,
-                        indent: &pad,
-                        input_vars: arg_vars.as_slice(),
-                        output_vars: out_vars.as_slice(),
-                    };
-                    if let Some(result) = plugin.codegen(&gen_ctx, *node_type, config) {
-                        for imp in &result.imports {
-                            lines.push(format!("{}{}", pad, imp));
-                        }
-                        lines.extend(result.lines);
-                    }
-                }
-            }
             IRStmt::While {
                 cond_lines,
                 cond_var,
@@ -1041,6 +1314,10 @@ fn emit_rust_stmts(
                 lines.push(format!("{}println!(\"{{}}\", {});", pad, value_var))
             }
             IRStmt::Comment(msg) => lines.push(format!("{}// {}", pad, msg)),
+            IRStmt::Raw { by_lang, label } => match by_lang.iter().find(|(l, _)| *l == TargetLanguage::Rust) {
+                Some((_, code)) => lines.push(format!("{}{}", pad, code)),
+                None => lines.push(format!("{}// unsupported node for this target: {}", pad, label)),
+            },
             IRStmt::CallFunction {
                 var_name,
                 func_name,
@@ -1053,22 +1330,6 @@ fn emit_rust_stmts(
                 args.join(", ")
             )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
-            IRStmt::PluginCall { plugin_id, node_type, config, arg_vars, out_vars } => {
-                if let Some(plugin) = plugin_registry().lock().unwrap().find(*plugin_id) {
-                    let gen_ctx = CodeGenCtx {
-                        lang: TargetLanguage::Rust,
-                        indent: &pad,
-                        input_vars: arg_vars.as_slice(),
-                        output_vars: out_vars.as_slice(),
-                    };
-                    if let Some(result) = plugin.codegen(&gen_ctx, *node_type, config) {
-                        for imp in &result.imports {
-                            lines.push(format!("{}{}", pad, imp));
-                        }
-                        lines.extend(result.lines);
-                    }
-                }
-            }
             IRStmt::While {
                 cond_lines,
                 cond_var,
@@ -1190,6 +1451,10 @@ fn emit_js_stmts(
                 lines.push(format!("{}console.log({});", pad, value_var))
             }
             IRStmt::Comment(msg) => lines.push(format!("{}// {}", pad, msg)),
+            IRStmt::Raw { by_lang, label } => match by_lang.iter().find(|(l, _)| *l == TargetLanguage::JavaScript) {
+                Some((_, code)) => lines.push(format!("{}{}", pad, code)),
+                None => lines.push(format!("{}// unsupported node for this target: {}", pad, label)),
+            },
             IRStmt::CallFunction {
                 var_name,
                 func_name,
@@ -1202,22 +1467,6 @@ fn emit_js_stmts(
                 args.join(", ")
             )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
-            IRStmt::PluginCall { plugin_id, node_type, config, arg_vars, out_vars } => {
-                if let Some(plugin) = plugin_registry().lock().unwrap().find(*plugin_id) {
-                    let gen_ctx = CodeGenCtx {
-                        lang: TargetLanguage::JavaScript,
-                        indent: &pad,
-                        input_vars: arg_vars.as_slice(),
-                        output_vars: out_vars.as_slice(),
-                    };
-                    if let Some(result) = plugin.codegen(&gen_ctx, *node_type, config) {
-                        for imp in &result.imports {
-                            lines.push(format!("{}{}", pad, imp));
-                        }
-                        lines.extend(result.lines);
-                    }
-                }
-            }
             IRStmt::While {
                 cond_lines,
                 cond_var,
@@ -1328,6 +1577,10 @@ fn emit_cpp_stmts(
                 lines.push(format!("{}std::cout << {} << std::endl;", pad, value_var))
             }
             IRStmt::Comment(msg) => lines.push(format!("{}// {}", pad, msg)),
+            IRStmt::Raw { by_lang, label } => match by_lang.iter().find(|(l, _)| *l == TargetLanguage::Cpp) {
+                Some((_, code)) => lines.push(format!("{}{}", pad, code)),
+                None => lines.push(format!("{}// unsupported node for this target: {}", pad, label)),
+            },
             IRStmt::CallFunction {
                 var_name,
                 func_name,
@@ -1340,22 +1593,6 @@ fn emit_cpp_stmts(
                 args.join(", ")
             )),
             IRStmt::Return(v) => lines.push(format!("{}return {};", pad, v)),
-            IRStmt::PluginCall { plugin_id, node_type, config, arg_vars, out_vars } => {
-                if let Some(plugin) = plugin_registry().lock().unwrap().find(*plugin_id) {
-                    let gen_ctx = CodeGenCtx {
-                        lang: TargetLanguage::Cpp,
-                        indent: &pad,
-                        input_vars: arg_vars.as_slice(),
-                        output_vars: out_vars.as_slice(),
-                    };
-                    if let Some(result) = plugin.codegen(&gen_ctx, *node_type, config) {
-                        for imp in &result.imports {
-                            lines.push(format!("{}{}", pad, imp));
-                        }
-                        lines.extend(result.lines);
-                    }
-                }
-            }
             IRStmt::While {
                 cond_lines,
                 cond_var,
@@ -1597,20 +1834,6 @@ impl DebugVm {
                     .and_then(|v| v.as_number())
                     .unwrap_or(0.0);
                 self.unwind_return(value);
-            }
-            NodeKind::Plugin(inst) => {
-                if let Some(plugin) = plugin_registry().lock().unwrap().find(inst.plugin_id) {
-                    let inputs = app.collect_plugin_inputs(node_id, inst, &self.variables, &self.call_cache);
-                    let mut sim_ctx = SimCtx { console: &mut self.console, step: self.steps };
-                    let result = plugin.simulate(&mut sim_ctx, inst.node_type, &inst.config, &inputs);
-                    if let Some(first) = result.outputs.first() {
-                        self.call_cache.insert(node_id, first.as_number().unwrap_or(0.0));
-                    }
-                } else {
-                    self.console.push(format!("missing plugin: {}", inst.plugin_id));
-                }
-                let next = app.find_exec_target(node_id, 0);
-                self.set_current(next);
             }
             _ => self.set_current(None),
         }
@@ -2327,6 +2550,9 @@ struct BlockoApp {
     last_step_at: Instant,
     show_variable_inspector: bool,
 
+    // --- Stage 18: Plugin system ---
+    plugin_registry: PluginRegistry,
+
     // --- Stage 17: Sub-graphs & reusable functions ---
     subgraphs: HashMap<GraphId, (HashMap<NodeId, Node>, Vec<Connection>)>,
     graph_names: HashMap<GraphId, String>,
@@ -2343,6 +2569,9 @@ struct BlockoApp {
 
 impl BlockoApp {
     fn new() -> Self {
+        let mut plugin_registry = PluginRegistry::new();
+        plugin_registry.install(Box::new(NetworkingPlugin));
+
         Self {
             nodes: HashMap::new(),
             connections: Vec::new(),
@@ -2362,6 +2591,7 @@ impl BlockoApp {
             step_delay: Duration::from_millis(400),
             last_step_at: Instant::now(),
             show_variable_inspector: true,
+            plugin_registry,
             subgraphs: HashMap::new(),
             graph_names: HashMap::from([(ROOT_GRAPH_ID, "Main".to_string())]),
             graph_kinds: HashMap::new(),
@@ -3207,7 +3437,17 @@ impl BlockoApp {
                     Some(Value::Number(else_val))
                 }
             }
-            NodeKind::Plugin(_) => call_cache.get(&node_id).copied().map(Value::Number),
+            NodeKind::Plugin(state) => {
+                let def = self.plugin_registry.def(&state.def_id)?;
+                let mut inputs: Vec<Option<Value>> = Vec::with_capacity(state.data_in.len());
+                for i in 0..state.data_in.len() {
+                    let v = self
+                        .find_source_for_input(node_id, i)
+                        .and_then(|src| self.evaluate_output(src.node_id, visiting, variables, call_cache));
+                    inputs.push(v);
+                }
+                def.evaluate(&EvalContext { config: &state.config, inputs: &inputs })
+            }
             _ => None,
         };
 
@@ -3382,14 +3622,30 @@ impl BlockoApp {
                     *return_slot = Some(value);
                     return;
                 }
-                NodeKind::Plugin(inst) => {
-                    if let Some(plugin) = plugin_registry().lock().unwrap().find(inst.plugin_id) {
-                        let inputs = self.collect_plugin_inputs(id, inst, variables, call_cache);
-                        let mut sim_ctx = SimCtx { console, step: *steps };
-                        let result = plugin.simulate(&mut sim_ctx, inst.node_type, &inst.config, &inputs);
-                        if let Some(first) = result.outputs.first() {
-                            call_cache.insert(id, first.as_number().unwrap_or(0.0));
+                NodeKind::Plugin(state) => {
+                    if let Some(def) = self.plugin_registry.def(&state.def_id) {
+                        let mut inputs: Vec<Option<Value>> = Vec::with_capacity(state.data_in.len());
+                        for i in 0..state.data_in.len() {
+                            let mut visiting = Vec::new();
+                            let v = self
+                                .find_source_for_input(id, i)
+                                .and_then(|src| {
+                                    self.evaluate_output(src.node_id, &mut visiting, variables, call_cache)
+                                });
+                            inputs.push(v);
                         }
+                        let mut effects: Vec<PluginEffect> = Vec::new();
+                        def.execute(&mut ExecContext {
+                            config: &state.config,
+                            inputs: &inputs,
+                            console,
+                            effects: &mut effects,
+                        });
+                        for effect in effects {
+                            console.push(describe_plugin_effect(&effect));
+                        }
+                    } else {
+                        console.push(format!("Unknown plugin node: {}", state.def_id.0));
                     }
                     current = self.find_exec_target(id, 0);
                 }
@@ -3398,30 +3654,6 @@ impl BlockoApp {
                 }
             }
         }
-    }
-
-    fn collect_plugin_inputs(
-        &self,
-        node_id: NodeId,
-        inst: &PluginInstance,
-        variables: &HashMap<String, f32>,
-        call_cache: &HashMap<NodeId, f32>,
-    ) -> Vec<PluginRuntimeValue> {
-        let mut inputs = Vec::new();
-        if let Some(def) = plugin_def_for(inst) {
-            for i in 0..def.data_inputs.len() {
-                let mut visiting = Vec::new();
-                let value = self
-                    .find_source_for_input(node_id, i)
-                    .and_then(|src| self.evaluate_output(src.node_id, &mut visiting, variables, call_cache));
-                inputs.push(match value {
-                    Some(Value::Number(n)) => PluginRuntimeValue::Number(n),
-                    Some(Value::Bool(b)) => PluginRuntimeValue::Bool(b),
-                    None => PluginRuntimeValue::Number(0.0),
-                });
-            }
-        }
-        inputs
     }
 
     fn run_legacy_prints(&self, console: &mut Vec<String>) {
@@ -3802,30 +4034,20 @@ impl BlockoApp {
                     out.push(IRStmt::Return(value_var));
                     current = None;
                 }
-                NodeKind::Plugin(inst) => {
-                    let mut arg_vars = Vec::new();
-                    if let Some(def) = plugin_def_for(inst) {
-                        for i in 0..def.data_inputs.len() {
-                            let mut visiting = Vec::new();
-                            let var = self
-                                .find_source_for_input(id, i)
-                                .and_then(|src| {
-                                    self.build_expr_ir(src.node_id, &mut var_names, &mut out, counters, &mut visiting)
-                                })
-                                .map(|(n, _)| n)
-                                .unwrap_or_else(|| "0.0".to_string());
-                            arg_vars.push(var);
-                        }
-                        let out_vars: Vec<String> = (0..def.data_outputs.len())
-                            .map(|i| format!("plugin_{}_{}_{}", inst.node_type, id, i))
-                            .collect();
-                        out.push(IRStmt::PluginCall {
-                            plugin_id: inst.plugin_id,
-                            node_type: inst.node_type,
-                            config: inst.config.clone(),
-                            arg_vars,
-                            out_vars,
-                        });
+                NodeKind::Plugin(state) => {
+                    if let Some(def) = self.plugin_registry.def(&state.def_id) {
+                        let by_lang: Vec<(TargetLanguage, String)> = [
+                            TargetLanguage::Python,
+                            TargetLanguage::Rust,
+                            TargetLanguage::JavaScript,
+                            TargetLanguage::Cpp,
+                        ]
+                        .into_iter()
+                        .filter_map(|lang| def.codegen(lang, &state.config).map(|code| (lang, code)))
+                        .collect();
+                        out.push(IRStmt::Raw { by_lang, label: def.title().to_string() });
+                    } else {
+                        out.push(IRStmt::Comment(format!("unknown plugin node: {}", state.def_id.0)));
                     }
                     current = self.find_exec_target(id, 0);
                 }
@@ -4211,15 +4433,6 @@ fn pin_color(data_type: PinDataType) -> Color32 {
         PinDataType::Bool => theme::PIN_BOOL,
         PinDataType::Any => theme::PIN_ANY,
         PinDataType::Exec => theme::PIN_EXEC,
-        PinDataType::Semantic(id) => {
-            let (r, g, b) = plugin_registry()
-                .lock()
-                .unwrap()
-                .semantic_type(id)
-                .map(|t| t.color)
-                .unwrap_or((180, 180, 180));
-            Color32::from_rgb(r, g, b)
-        }
     }
 }
 
